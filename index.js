@@ -7,10 +7,24 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 const MODULE_NAME = 'sillytavern-avatar-focus';
 const RESOURCE_NAME = 'third-party/sillytavern-avatar-focus';
 const AVATAR_SELECTOR = [
-    '#chat .mesAvatarWrapper .avatar:not(.avatar_collage) img',
-    '#rm_print_characters_block .character_select .avatar:not(.avatar_collage) img',
-    '#user_avatar_block .avatar:not(.avatar_collage) img',
-    '.avatars_inline .avatar:not(.avatar_collage) img',
+    '#chat .mesAvatarWrapper img',
+    '#chat .mes [class*="avatar"] img',
+    '#rm_print_characters_block .character_select img',
+    '#user_avatar_block .avatar-container img',
+    '.avatars_inline img',
+].join(',');
+const AVATAR_HIT_REGION_SELECTOR = [
+    '.mesAvatarWrapper',
+    '.avatar:not(.avatar_collage)',
+    '.character_select',
+    '.avatar-container',
+    '.avatars_inline',
+    '[class*="avatar-frame"]',
+    '[class*="avatarFrame"]',
+    '[class*="avatar-mask"]',
+    '[class*="avatarMask"]',
+    '[class*="avatar-border"]',
+    '[class*="avatarBorder"]',
 ].join(',');
 const DEFAULTS = Object.freeze({
     enabled: true,
@@ -140,10 +154,60 @@ function getImageKey(image) {
     }
 }
 
+function avatarCandidateScore(image) {
+    if (!(image instanceof HTMLImageElement)
+        || !image.getAttribute('src')
+        || image.closest('.avatar_collage')) {
+        return -Infinity;
+    }
+
+    const source = image.getAttribute('src') || image.currentSrc || image.src || '';
+    const identity = [
+        image.id,
+        image.className,
+        image.alt,
+        image.parentElement?.id,
+        image.parentElement?.className,
+    ].join(' ').toLowerCase();
+    let score = 0;
+
+    if (/\/thumbnail\?.*type=(avatar|persona)|\/characters\/|user[ _-]?avatars?|\/personas?\//i.test(source)) {
+        score += 140;
+    }
+    if (image.closest('.avatar:not(.avatar_collage)')) {
+        score += 70;
+    }
+    if (image.closest('.mesAvatarWrapper')) {
+        score += 35;
+    }
+    if (/(avatar|portrait|profile|face|head)/i.test(identity)) {
+        score += 28;
+    }
+    if (getComputedStyle(image).objectFit === 'cover') {
+        score += 18;
+    }
+    const rect = image.getBoundingClientRect();
+    if (rect.width > 8 && rect.height > 8) {
+        score += 12;
+    }
+    if (/(frame|border|overlay|decor|ornament|badge|foreground)/i.test(identity)) {
+        score -= 120;
+    }
+    return score;
+}
+
 function isAvatarImage(image) {
     return image instanceof HTMLImageElement
         && image.matches(AVATAR_SELECTOR)
-        && !image.closest('.avatar_collage');
+        && avatarCandidateScore(image) >= 30;
+}
+
+function bestAvatarImage(images) {
+    return Array.from(images)
+        .filter((image) => image instanceof HTMLImageElement)
+        .map((image) => ({ image, score: avatarCandidateScore(image) }))
+        .filter((candidate) => candidate.score >= 30)
+        .sort((left, right) => right.score - left.score)[0]?.image || null;
 }
 
 function findAvatarFromTarget(target) {
@@ -153,9 +217,77 @@ function findAvatarFromTarget(target) {
     if (target instanceof HTMLImageElement && isAvatarImage(target)) {
         return target;
     }
-    const avatar = target.closest('.avatar:not(.avatar_collage)');
-    const image = avatar?.querySelector('img');
-    return isAvatarImage(image) ? image : null;
+
+    const hitRegion = target.closest(AVATAR_HIT_REGION_SELECTOR);
+    if (!hitRegion) {
+        return null;
+    }
+
+    const message = target.closest('#chat .mes');
+    const messageAvatarWrapper = message?.querySelector('.mesAvatarWrapper');
+    const searchRegion = messageAvatarWrapper || hitRegion;
+    const candidates = [
+        ...searchRegion.querySelectorAll('img'),
+        ...(message && searchRegion !== message ? message.querySelectorAll('[class*="avatar"] img') : []),
+    ];
+    return bestAvatarImage(candidates);
+}
+
+function pointInsideRect(x, y, rect, padding = 0) {
+    return x >= rect.left - padding
+        && x <= rect.right + padding
+        && y >= rect.top - padding
+        && y <= rect.bottom + padding;
+}
+
+function findAvatarFromInteraction(target, clientX, clientY) {
+    const direct = findAvatarFromTarget(target);
+    if (direct) {
+        return direct;
+    }
+    if (!(target instanceof Element)
+        || !Number.isFinite(clientX)
+        || !Number.isFinite(clientY)) {
+        return null;
+    }
+
+    const message = target.closest('#chat .mes');
+    if (!message) {
+        return null;
+    }
+    const candidates = Array.from(message.querySelectorAll('img'))
+        .filter((image) => avatarCandidateScore(image) >= 30)
+        .map((image) => {
+            const rect = image.getBoundingClientRect();
+            return {
+                image,
+                rect,
+                score: avatarCandidateScore(image),
+                containsPoint: pointInsideRect(clientX, clientY, rect, 18),
+            };
+        })
+        .filter((candidate) => candidate.containsPoint)
+        .sort((left, right) => right.score - left.score);
+    if (candidates.length) {
+        return candidates[0].image;
+    }
+
+    const wrapper = message.querySelector('.mesAvatarWrapper');
+    if (wrapper && pointInsideRect(clientX, clientY, wrapper.getBoundingClientRect(), 24)) {
+        return bestAvatarImage(message.querySelectorAll('img'));
+    }
+    return null;
+}
+
+function findAvatarFeedbackElement(target, image) {
+    const imageRegion = image?.closest('.mesAvatarWrapper, .avatar:not(.avatar_collage), .character_select, .avatar-container');
+    if (imageRegion) {
+        return imageRegion;
+    }
+    if (target instanceof Element) {
+        return target.closest(AVATAR_HIT_REGION_SELECTOR) || image;
+    }
+    return image;
 }
 
 function rememberOriginalPosition(image) {
@@ -433,7 +565,7 @@ function handleAvatarClickSequence(event) {
         return;
     }
 
-    const image = findAvatarFromTarget(event.target);
+    const image = findAvatarFromInteraction(event.target, event.clientX, event.clientY);
     const descriptor = image ? getReplacementDescriptor(image) : null;
     if (!image || !descriptor) {
         return;
@@ -741,6 +873,8 @@ function clearPendingPress() {
     clearTimeout(pendingPress.timer);
     clearTimeout(pendingPress.hintTimer);
     pendingPress.image.classList.remove('stafe-holding');
+    pendingPress.feedbackElement?.classList.remove('stafe-holding-target');
+    pendingPress.feedbackElement?.classList.remove('stafe-gesture-surface');
     pendingPress = null;
 }
 
@@ -751,7 +885,7 @@ function beginLongPress(event) {
     if (event.pointerType === 'mouse' && event.button !== 0) {
         return;
     }
-    const image = findAvatarFromTarget(event.target);
+    const image = findAvatarFromInteraction(event.target, event.clientX, event.clientY);
     if (!image) {
         return;
     }
@@ -762,18 +896,25 @@ function beginLongPress(event) {
         pointerId: event.pointerId,
         pointerType: event.pointerType,
         image,
+        feedbackElement: findAvatarFeedbackElement(event.target, image),
         key,
         startX: event.clientX,
         startY: event.clientY,
         timer: 0,
         hintTimer: 0,
     };
-    press.hintTimer = window.setTimeout(() => image.classList.add('stafe-holding'), 140);
+    press.feedbackElement?.classList.add('stafe-gesture-surface');
+    press.hintTimer = window.setTimeout(() => {
+        image.classList.add('stafe-holding');
+        press.feedbackElement?.classList.add('stafe-holding-target');
+    }, 140);
     press.timer = window.setTimeout(() => {
         if (pendingPress !== press) {
             return;
         }
         image.classList.remove('stafe-holding');
+        press.feedbackElement?.classList.remove('stafe-holding-target');
+        press.feedbackElement?.classList.remove('stafe-gesture-surface');
         pendingPress = null;
         suppressClickUntil = Date.now() + 900;
         suppressClickKey = key;
@@ -795,7 +936,8 @@ function moveLongPress(event) {
         event.clientX - pendingPress.startX,
         event.clientY - pendingPress.startY,
     );
-    if (distance > 12) {
+    const cancelDistance = pendingPress.pointerType === 'touch' ? 20 : 12;
+    if (distance > cancelDistance) {
         clearPendingPress();
     }
 }
@@ -807,7 +949,7 @@ function bindLongPress() {
     document.addEventListener('pointercancel', clearPendingPress, true);
     document.addEventListener('scroll', clearPendingPress, true);
     document.addEventListener('contextmenu', (event) => {
-        const image = findAvatarFromTarget(event.target);
+        const image = findAvatarFromInteraction(event.target, event.clientX, event.clientY);
         const shouldSuppress = image && (
             pendingPress?.image === image
             || (Date.now() < suppressClickUntil && getImageKey(image) === suppressClickKey)
@@ -821,17 +963,49 @@ function bindLongPress() {
         if (Date.now() >= suppressClickUntil) {
             return;
         }
-        const image = findAvatarFromTarget(event.target);
+        const image = findAvatarFromInteraction(event.target, event.clientX, event.clientY);
         if (image && getImageKey(image) === suppressClickKey) {
             event.preventDefault();
             event.stopImmediatePropagation();
         }
     }, true);
     document.addEventListener('dragstart', (event) => {
-        if (pendingPress && findAvatarFromTarget(event.target) === pendingPress.image) {
+        if (pendingPress && findAvatarFromInteraction(event.target, event.clientX, event.clientY) === pendingPress.image) {
             event.preventDefault();
         }
     }, true);
+
+    if (!('PointerEvent' in window)) {
+        document.addEventListener('touchstart', (event) => {
+            if (event.touches.length !== 1 || pendingPress) {
+                return;
+            }
+            const touch = event.touches[0];
+            beginLongPress({
+                target: event.target,
+                isPrimary: true,
+                pointerType: 'touch',
+                button: 0,
+                pointerId: 'touch-' + touch.identifier,
+                clientX: touch.clientX,
+                clientY: touch.clientY,
+            });
+        }, { capture: true, passive: true });
+        document.addEventListener('touchmove', (event) => {
+            const touch = Array.from(event.touches).find(
+                (item) => 'touch-' + item.identifier === pendingPress?.pointerId,
+            );
+            if (touch) {
+                moveLongPress({
+                    pointerId: pendingPress.pointerId,
+                    clientX: touch.clientX,
+                    clientY: touch.clientY,
+                });
+            }
+        }, { capture: true, passive: true });
+        document.addEventListener('touchend', clearPendingPress, true);
+        document.addEventListener('touchcancel', clearPendingPress, true);
+    }
 }
 
 function bindTripleClickReplacement() {

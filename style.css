@@ -245,6 +245,28 @@ img.stafe-holding {
   filter: brightness(1.08);
 }
 
+.stafe-holding-target {
+  outline: 3px solid var(--SmartThemeQuoteColor, #a886d9) !important;
+  outline-offset: 3px;
+}
+
+.stafe-gesture-surface,
+.stafe-gesture-surface * {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+#chat .mesAvatarWrapper,
+#chat .mesAvatarWrapper *,
+#chat .mes [class*="avatar-frame"],
+#chat .mes [class*="avatar-mask"],
+#chat .mes [class*="avatar-border"] {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 @media (max-width: 520px) {
   .stafe-dialog {
     width: min(96vw, 520px);
