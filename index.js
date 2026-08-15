@@ -1,6 +1,5 @@
 import {
     getRequestHeaders,
-    refreshCharacterAvatarImages,
     saveSettingsDebounced,
 } from '../../../../script.js';
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
@@ -369,7 +368,6 @@ async function replaceCharacterAvatar(file) {
             throw new Error(details || 'HTTP ' + response.status);
         }
 
-        await refreshCharacterAvatarImages(target.avatarId);
         bustVisibleAvatarCache(target.key);
 
         const formAvatar = document.querySelector('#form_create [name="avatar_url"]');
