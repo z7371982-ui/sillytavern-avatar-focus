@@ -263,15 +263,12 @@ body.stafe-modal-open {
 }
 
 img.stafe-holding {
-  outline: 3px solid var(--SmartThemeQuoteColor, #a886d9) !important;
-  outline-offset: 3px;
   animation: none !important;
-  filter: brightness(1.08);
+  filter: brightness(1.12);
 }
 
 .stafe-holding-target {
-  outline: 3px solid var(--SmartThemeQuoteColor, #a886d9) !important;
-  outline-offset: 3px;
+  outline: none !important;
 }
 
 .stafe-gesture-surface,
