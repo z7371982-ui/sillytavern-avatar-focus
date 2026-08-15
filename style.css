@@ -265,6 +265,7 @@ body.stafe-modal-open {
 img.stafe-holding {
   outline: 3px solid var(--SmartThemeQuoteColor, #a886d9) !important;
   outline-offset: 3px;
+  animation: none !important;
   filter: brightness(1.08);
 }
 
@@ -379,16 +380,5 @@ html.stafe-compact-viewport .stafe-dialog-actions {
   .stafe-controls {
     gap: 0.5rem;
     padding-bottom: 0.65rem;
-  }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  img.stafe-holding {
-    animation: stafe-hold-pulse 0.55s ease-in-out infinite alternate;
-  }
-
-  @keyframes stafe-hold-pulse {
-    from { transform: scale(1); }
-    to { transform: scale(0.96); }
   }
 }
