@@ -54,13 +54,15 @@ body.stafe-modal-open {
 
 .stafe-editor {
   position: fixed;
-  top: 0;
-  right: 0;
+  box-sizing: border-box;
+  top: var(--stafe-viewport-top, 0px);
+  right: auto;
   bottom: auto;
-  left: 0;
+  left: var(--stafe-viewport-left, 0px);
   z-index: 100001;
   display: grid;
-  width: 100%;
+  width: 100vw;
+  width: var(--stafe-viewport-width, 100vw);
   height: 100vh;
   height: var(--stafe-viewport-height, 100dvh);
   min-height: 0;
@@ -80,16 +82,26 @@ body.stafe-modal-open {
 
 .stafe-dialog {
   position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(94vw, 520px);
   max-height: calc(92vh - 28px);
   max-height: min(92dvh, 760px);
   max-height: min(calc(var(--stafe-viewport-height, 100dvh) - 28px), 760px);
-  overflow: auto;
+  overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 75%, transparent);
   border-radius: 20px;
   background: var(--SmartThemeBlurTintColor, #252525);
   box-shadow: 0 22px 70px rgba(0, 0, 0, 0.48);
   overscroll-behavior: contain;
+}
+
+.stafe-dialog-content {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .stafe-dialog-header {
@@ -326,6 +338,28 @@ img.stafe-holding {
     flex: 1 1 auto;
     min-width: 0;
   }
+}
+
+html.stafe-compact-viewport .stafe-editor {
+  place-items: center;
+  padding: 8px;
+}
+
+html.stafe-compact-viewport .stafe-dialog {
+  width: 100%;
+  max-width: 520px;
+  height: auto;
+  max-height: calc(var(--stafe-viewport-height, 100dvh) - 16px);
+  border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 75%, transparent);
+  border-radius: 18px;
+}
+
+html.stafe-compact-viewport .stafe-dialog-header {
+  padding-top: calc(0.82rem + env(safe-area-inset-top));
+}
+
+html.stafe-compact-viewport .stafe-dialog-actions {
+  padding-bottom: calc(0.9rem + env(safe-area-inset-bottom));
 }
 
 @media (max-width: 520px) and (max-height: 620px) {

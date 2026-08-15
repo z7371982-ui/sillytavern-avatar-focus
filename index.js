@@ -672,11 +672,24 @@ function sizePreviewFrame(source, frame) {
 }
 
 function updateEditorViewportHeight() {
+    const viewport = window.visualViewport;
     const viewportHeight = Math.max(
-        320,
-        Math.round(window.visualViewport?.height || window.innerHeight || 0),
+        1,
+        Math.floor(viewport?.height || window.innerHeight || 0),
     );
+    const viewportWidth = Math.max(1, Math.floor(viewport?.width || window.innerWidth || 0));
+    const viewportTop = Math.max(0, Math.floor(viewport?.offsetTop || 0));
+    const viewportLeft = Math.max(0, Math.floor(viewport?.offsetLeft || 0));
+    const root = document.documentElement;
+
+    root.style.setProperty('--stafe-viewport-width', viewportWidth + 'px');
     document.documentElement.style.setProperty('--stafe-viewport-height', viewportHeight + 'px');
+    root.style.setProperty('--stafe-viewport-top', viewportTop + 'px');
+    root.style.setProperty('--stafe-viewport-left', viewportLeft + 'px');
+    root.classList.toggle(
+        'stafe-compact-viewport',
+        viewportWidth <= 700 || window.matchMedia('(pointer: coarse)').matches,
+    );
 }
 
 function renderEditorPosition(position, applyLive = true) {
@@ -735,11 +748,13 @@ function openEditor(image) {
     editor.hidden = false;
     editor.setAttribute('aria-hidden', 'false');
     document.body.classList.add('stafe-modal-open');
-    const dialog = editor.querySelector('.stafe-dialog');
-    if (dialog instanceof HTMLElement) {
-        dialog.scrollTop = 0;
+    const content = editor.querySelector('.stafe-dialog-content');
+    if (content instanceof HTMLElement) {
+        content.scrollTop = 0;
     }
     requestAnimationFrame(() => {
+        updateEditorViewportHeight();
+        sizePreviewFrame(image, frame);
         editor.querySelector('[data-stafe-action="save"]')?.focus();
     });
 }
@@ -1168,6 +1183,7 @@ async function initialize() {
     updateEditorViewportHeight();
     window.addEventListener('resize', updateEditorViewportHeight, { passive: true });
     window.visualViewport?.addEventListener('resize', updateEditorViewportHeight, { passive: true });
+    window.visualViewport?.addEventListener('scroll', updateEditorViewportHeight, { passive: true });
     try {
         await installEditor();
         await installSettingsPanel();

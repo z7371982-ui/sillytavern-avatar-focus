@@ -11,24 +11,26 @@
       </button>
     </header>
 
-    <div class="stafe-preview-area">
-      <div id="stafe_preview_frame" class="stafe-preview-frame">
-        <img id="stafe_preview_image" alt="">
-        <span class="stafe-grid stafe-grid-x"></span>
-        <span class="stafe-grid stafe-grid-y"></span>
+    <div class="stafe-dialog-content">
+      <div class="stafe-preview-area">
+        <div id="stafe_preview_frame" class="stafe-preview-frame">
+          <img id="stafe_preview_image" alt="">
+          <span class="stafe-grid stafe-grid-x"></span>
+          <span class="stafe-grid stafe-grid-y"></span>
+        </div>
+        <p class="stafe-drag-hint"><i class="fa-solid fa-up-down-left-right"></i> 按住图片拖动，调整到合适位置</p>
       </div>
-      <p class="stafe-drag-hint"><i class="fa-solid fa-up-down-left-right"></i> 按住图片拖动，调整到合适位置</p>
-    </div>
 
-    <div class="stafe-controls">
-      <label>
-        <span>取景：左 <output id="stafe_x_value">50%</output> 右</span>
-        <input id="stafe_x_position" type="range" min="0" max="100" step="1" value="50">
-      </label>
-      <label>
-        <span>取景：上 <output id="stafe_y_value">50%</output> 下</span>
-        <input id="stafe_y_position" type="range" min="0" max="100" step="1" value="50">
-      </label>
+      <div class="stafe-controls">
+        <label>
+          <span>取景：左 <output id="stafe_x_value">50%</output> 右</span>
+          <input id="stafe_x_position" type="range" min="0" max="100" step="1" value="50">
+        </label>
+        <label>
+          <span>取景：上 <output id="stafe_y_value">50%</output> 下</span>
+          <input id="stafe_y_position" type="range" min="0" max="100" step="1" value="50">
+        </label>
+      </div>
     </div>
 
     <footer class="stafe-dialog-actions">
