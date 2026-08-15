@@ -25,13 +25,6 @@ const AVATAR_HIT_REGION_SELECTOR = [
     '[class*="avatarMask"]',
     '[class*="avatar-border"]',
     '[class*="avatarBorder"]',
-    '#chat .mes [class*="avatar"]',
-    '#chat .mes [class*="portrait"]',
-    '#chat .mes [class*="profile-pic"]',
-    '#chat .mes [class*="profile_pic"]',
-    '#chat .mes [class*="pfp"]',
-    '#chat .mes .ch_name',
-    '#chat .mes .name_text',
 ].join(',');
 const DEFAULTS = Object.freeze({
     enabled: true,
@@ -258,19 +251,6 @@ function findAvatarFromInteraction(target, clientX, clientY) {
         return null;
     }
 
-    const stackedElements = typeof document.elementsFromPoint === 'function'
-        ? document.elementsFromPoint(clientX, clientY)
-        : [];
-    for (const element of stackedElements) {
-        if (element === target) {
-            continue;
-        }
-        const stackedAvatar = findAvatarFromTarget(element);
-        if (stackedAvatar) {
-            return stackedAvatar;
-        }
-    }
-
     const message = target.closest('#chat .mes');
     if (!message) {
         return null;
@@ -300,12 +280,6 @@ function findAvatarFromInteraction(target, clientX, clientY) {
 }
 
 function findAvatarFeedbackElement(target, image) {
-    const nameRegion = target instanceof Element
-        ? target.closest('#chat .mes .ch_name, #chat .mes .name_text')
-        : null;
-    if (nameRegion) {
-        return nameRegion;
-    }
     const imageRegion = image?.closest('.mesAvatarWrapper, .avatar:not(.avatar_collage), .character_select, .avatar-container');
     if (imageRegion) {
         return imageRegion;
@@ -684,7 +658,9 @@ function sizePreviewFrame(source, frame) {
         : 1;
     const ratio = rect.width > 1 && rect.height > 1 ? rect.width / rect.height : naturalRatio;
     const maxWidth = Math.min(window.innerWidth * 0.76, 320);
-    const maxHeight = Math.min(window.innerHeight * 0.45, 360);
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    const mobileHeightFactor = window.matchMedia('(max-width: 520px)').matches ? 0.36 : 0.45;
+    const maxHeight = Math.min(viewportHeight * mobileHeightFactor, 360);
     let width = maxWidth;
     let height = width / Math.max(0.2, ratio);
     if (height > maxHeight) {
@@ -693,6 +669,14 @@ function sizePreviewFrame(source, frame) {
     }
     frame.style.width = Math.max(120, width) + 'px';
     frame.style.height = Math.max(120, height) + 'px';
+}
+
+function updateEditorViewportHeight() {
+    const viewportHeight = Math.max(
+        320,
+        Math.round(window.visualViewport?.height || window.innerHeight || 0),
+    );
+    document.documentElement.style.setProperty('--stafe-viewport-height', viewportHeight + 'px');
 }
 
 function renderEditorPosition(position, applyLive = true) {
@@ -744,12 +728,17 @@ function openEditor(image) {
     preview.alt = getAvatarLabel(image);
     document.getElementById('stafe_avatar_name').textContent = getAvatarLabel(image);
     copyFrameAppearance(image, preview, frame);
+    updateEditorViewportHeight();
     sizePreviewFrame(image, frame);
     renderEditorPosition(start, true);
 
     editor.hidden = false;
     editor.setAttribute('aria-hidden', 'false');
     document.body.classList.add('stafe-modal-open');
+    const dialog = editor.querySelector('.stafe-dialog');
+    if (dialog instanceof HTMLElement) {
+        dialog.scrollTop = 0;
+    }
     requestAnimationFrame(() => {
         editor.querySelector('[data-stafe-action="save"]')?.focus();
     });
@@ -1176,6 +1165,9 @@ async function installEditor() {
 
 async function initialize() {
     getSettings();
+    updateEditorViewportHeight();
+    window.addEventListener('resize', updateEditorViewportHeight, { passive: true });
+    window.visualViewport?.addEventListener('resize', updateEditorViewportHeight, { passive: true });
     try {
         await installEditor();
         await installSettingsPanel();

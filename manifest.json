@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "cicimil + Codex",
-  "version": "1.1.4",
+  "version": "1.1.3",
   "description": "长按头像调整显示位置；连续三击头像可直接选择并替换角色或用户头像。"
 }
