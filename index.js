@@ -25,6 +25,13 @@ const AVATAR_HIT_REGION_SELECTOR = [
     '[class*="avatarMask"]',
     '[class*="avatar-border"]',
     '[class*="avatarBorder"]',
+    '#chat .mes [class*="avatar"]',
+    '#chat .mes [class*="portrait"]',
+    '#chat .mes [class*="profile-pic"]',
+    '#chat .mes [class*="profile_pic"]',
+    '#chat .mes [class*="pfp"]',
+    '#chat .mes .ch_name',
+    '#chat .mes .name_text',
 ].join(',');
 const DEFAULTS = Object.freeze({
     enabled: true,
@@ -251,6 +258,19 @@ function findAvatarFromInteraction(target, clientX, clientY) {
         return null;
     }
 
+    const stackedElements = typeof document.elementsFromPoint === 'function'
+        ? document.elementsFromPoint(clientX, clientY)
+        : [];
+    for (const element of stackedElements) {
+        if (element === target) {
+            continue;
+        }
+        const stackedAvatar = findAvatarFromTarget(element);
+        if (stackedAvatar) {
+            return stackedAvatar;
+        }
+    }
+
     const message = target.closest('#chat .mes');
     if (!message) {
         return null;
@@ -280,6 +300,12 @@ function findAvatarFromInteraction(target, clientX, clientY) {
 }
 
 function findAvatarFeedbackElement(target, image) {
+    const nameRegion = target instanceof Element
+        ? target.closest('#chat .mes .ch_name, #chat .mes .name_text')
+        : null;
+    if (nameRegion) {
+        return nameRegion;
+    }
     const imageRegion = image?.closest('.mesAvatarWrapper, .avatar:not(.avatar_collage), .character_select, .avatar-container');
     if (imageRegion) {
         return imageRegion;
