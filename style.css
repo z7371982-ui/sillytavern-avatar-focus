@@ -1,0 +1,280 @@
+#stafe_settings .inline-drawer-content {
+  padding: 0.75rem;
+}
+
+#stafe_settings .stafe-note {
+  margin: 0 0 0.8rem;
+  padding: 0.68rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor) 42%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 82%, transparent);
+  line-height: 1.55;
+}
+
+#stafe_settings .stafe-field {
+  display: grid;
+  grid-template-columns: minmax(5rem, auto) minmax(9rem, 1fr);
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.85rem 0;
+}
+
+#stafe_settings .stafe-field select {
+  width: 100%;
+}
+
+#stafe_settings .stafe-record-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0.75rem 0 0.55rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 65%, transparent);
+}
+
+#stafe_settings small {
+  display: block;
+  opacity: 0.76;
+  line-height: 1.45;
+}
+
+#stafe_settings .stafe-setting-help {
+  margin: 0.18rem 0 0.4rem 1.8rem;
+}
+
+body.stafe-modal-open {
+  overflow: hidden !important;
+}
+
+.stafe-editor[hidden] {
+  display: none !important;
+}
+
+.stafe-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 100001;
+  display: grid;
+  place-items: center;
+  padding: max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+  color: var(--SmartThemeBodyColor, #f2f2f2);
+}
+
+.stafe-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.stafe-dialog {
+  position: relative;
+  width: min(94vw, 520px);
+  max-height: min(92dvh, 760px);
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 75%, transparent);
+  border-radius: 20px;
+  background: var(--SmartThemeBlurTintColor, #252525);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.48);
+  overscroll-behavior: contain;
+}
+
+.stafe-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.05rem 0.65rem;
+}
+
+.stafe-dialog-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.stafe-dialog-header p {
+  max-width: 390px;
+  margin: 0.22rem 0 0;
+  overflow: hidden;
+  opacity: 0.72;
+  font-size: 0.86rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stafe-icon-button {
+  display: grid;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
+  cursor: pointer;
+}
+
+.stafe-preview-area {
+  display: grid;
+  justify-items: center;
+  padding: 0.4rem 1rem 0.8rem;
+}
+
+.stafe-preview-frame {
+  position: relative;
+  width: 260px;
+  height: 260px;
+  max-width: 78vw;
+  max-height: 46dvh;
+  overflow: hidden;
+  border: 2px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #aaa) 80%, white 12%);
+  background:
+    linear-gradient(45deg, rgba(255,255,255,.055) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.055) 75%),
+    linear-gradient(45deg, rgba(255,255,255,.055) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.055) 75%);
+  background-position: 0 0, 10px 10px;
+  background-size: 20px 20px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  cursor: grab;
+  touch-action: none;
+}
+
+.stafe-preview-frame.stafe-dragging {
+  cursor: grabbing;
+}
+
+.stafe-preview-frame img {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.stafe-grid {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.38;
+}
+
+.stafe-grid-x {
+  top: 33.333%;
+  right: 0;
+  bottom: 33.333%;
+  left: 0;
+  border-top: 1px dashed white;
+  border-bottom: 1px dashed white;
+}
+
+.stafe-grid-y {
+  top: 0;
+  right: 33.333%;
+  bottom: 0;
+  left: 33.333%;
+  border-right: 1px dashed white;
+  border-left: 1px dashed white;
+}
+
+.stafe-drag-hint {
+  margin: 0.72rem 0 0;
+  opacity: 0.74;
+  font-size: 0.86rem;
+  text-align: center;
+}
+
+.stafe-controls {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0 1.05rem 0.95rem;
+}
+
+.stafe-controls label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.stafe-controls label > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.86rem;
+}
+
+.stafe-controls output {
+  min-width: 3.4rem;
+  padding: 0.08rem 0.38rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
+  text-align: center;
+}
+
+.stafe-controls input[type="range"] {
+  width: 100%;
+  accent-color: var(--SmartThemeQuoteColor, #a886d9);
+}
+
+.stafe-dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.8rem 1.05rem max(0.9rem, env(safe-area-inset-bottom));
+  border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 58%, transparent);
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #252525) 92%, black 8%);
+}
+
+.stafe-action-spacer {
+  flex: 1 1 auto;
+}
+
+.stafe-dialog-actions .stafe-save {
+  border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #a886d9) 70%, white 10%);
+  background: color-mix(in srgb, var(--SmartThemeQuoteColor, #a886d9) 48%, transparent);
+}
+
+img.stafe-holding {
+  outline: 3px solid var(--SmartThemeQuoteColor, #a886d9) !important;
+  outline-offset: 3px;
+  filter: brightness(1.08);
+}
+
+@media (max-width: 520px) {
+  .stafe-dialog {
+    width: min(96vw, 520px);
+    border-radius: 18px;
+  }
+
+  .stafe-dialog-header {
+    padding-top: 0.82rem;
+  }
+
+  .stafe-dialog-actions {
+    flex-wrap: wrap;
+  }
+
+  .stafe-action-spacer {
+    display: none;
+  }
+
+  .stafe-dialog-actions .menu_button {
+    flex: 1 1 auto;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  img.stafe-holding {
+    animation: stafe-hold-pulse 0.55s ease-in-out infinite alternate;
+  }
+
+  @keyframes stafe-hold-pulse {
+    from { transform: scale(1); }
+    to { transform: scale(0.96); }
+  }
+}

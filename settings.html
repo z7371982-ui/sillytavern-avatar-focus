@@ -1,0 +1,44 @@
+<div id="stafe_settings" class="stafe-settings">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+      <b>头像取景调整</b>
+      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+      <p class="stafe-note">
+        长按聊天区或角色列表里的头像，打开大图后拖动即可把脸部移到头像框内。
+        每个角色分别保存，切换圆形、方形或长方形头像框后仍可继续调整。
+      </p>
+
+      <label class="checkbox_label">
+        <input id="stafe_enabled" type="checkbox">
+        <span>启用长按调整</span>
+      </label>
+
+      <label class="checkbox_label">
+        <input id="stafe_triple_click_enabled" type="checkbox">
+        <span>启用三击头像直接替换</span>
+      </label>
+      <small class="stafe-setting-help">角色头像会直接写回角色卡；用户头像沿用酒馆自带的上传与裁剪流程。</small>
+
+      <label class="stafe-field" for="stafe_long_press">
+        <span>长按时间</span>
+        <select id="stafe_long_press" class="text_pole">
+          <option value="350">较快（0.35 秒）</option>
+          <option value="450">标准（0.45 秒）</option>
+          <option value="600">较慢（0.6 秒）</option>
+        </select>
+      </label>
+
+      <div class="stafe-record-row">
+        <span>已保存 <strong id="stafe_saved_count">0</strong> 个头像位置</span>
+        <button id="stafe_clear_all" class="menu_button menu_button_icon" type="button">
+          <i class="fa-solid fa-rotate-left"></i>
+          <span>全部恢复默认</span>
+        </button>
+      </div>
+
+      <small>长按调整只保存显示位置；三击并选定新图片后才会覆盖对应头像。扩展不会读取聊天内容。</small>
+    </div>
+  </div>
+</div>

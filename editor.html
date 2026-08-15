@@ -1,0 +1,48 @@
+<div id="stafe_editor" class="stafe-editor" hidden aria-hidden="true">
+  <div class="stafe-backdrop" data-stafe-action="cancel"></div>
+  <section class="stafe-dialog" role="dialog" aria-modal="true" aria-labelledby="stafe_editor_title">
+    <header class="stafe-dialog-header">
+      <div>
+        <h2 id="stafe_editor_title">调整头像取景</h2>
+        <p id="stafe_avatar_name">当前头像</p>
+      </div>
+      <button class="stafe-icon-button" data-stafe-action="cancel" type="button" aria-label="关闭">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </header>
+
+    <div class="stafe-preview-area">
+      <div id="stafe_preview_frame" class="stafe-preview-frame">
+        <img id="stafe_preview_image" alt="">
+        <span class="stafe-grid stafe-grid-x"></span>
+        <span class="stafe-grid stafe-grid-y"></span>
+      </div>
+      <p class="stafe-drag-hint"><i class="fa-solid fa-up-down-left-right"></i> 按住图片拖动，直到脸部露出来</p>
+    </div>
+
+    <div class="stafe-controls">
+      <label>
+        <span>取景：左 <output id="stafe_x_value">50%</output> 右</span>
+        <input id="stafe_x_position" type="range" min="0" max="100" step="1" value="50">
+      </label>
+      <label>
+        <span>取景：上 <output id="stafe_y_value">50%</output> 下</span>
+        <input id="stafe_y_position" type="range" min="0" max="100" step="1" value="50">
+      </label>
+    </div>
+
+    <footer class="stafe-dialog-actions">
+      <button class="menu_button menu_button_icon" data-stafe-action="center" type="button">
+        <i class="fa-solid fa-crosshairs"></i>
+        <span>恢复居中</span>
+      </button>
+      <span class="stafe-action-spacer"></span>
+      <button class="menu_button" data-stafe-action="cancel" type="button">取消</button>
+      <button class="menu_button menu_button_icon stafe-save" data-stafe-action="save" type="button">
+        <i class="fa-solid fa-check"></i>
+        <span>保存</span>
+      </button>
+    </footer>
+  </section>
+</div>
+<input id="stafe_replace_input" type="file" accept="image/*" hidden aria-hidden="true">

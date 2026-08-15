@@ -1,0 +1,11 @@
+{
+  "display_name": "头像取景调整",
+  "loading_order": 20,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "cicimil + Codex",
+  "version": "1.1.0",
+  "description": "长按头像调整显示位置；连续三击头像可直接选择并替换角色或用户头像。"
+}
