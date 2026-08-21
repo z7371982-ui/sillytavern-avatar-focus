@@ -2,10 +2,9 @@ import {
     getRequestHeaders,
     saveSettingsDebounced,
 } from '../../../../script.js';
-import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
+import { extension_settings } from '../../../extensions.js';
 
 const MODULE_NAME = 'sillytavern-avatar-focus';
-const RESOURCE_NAME = 'third-party/sillytavern-avatar-focus';
 const AVATAR_SELECTOR = [
     '#chat .mesAvatarWrapper img',
     '#chat .mes [class*="avatar"] img',
@@ -43,8 +42,30 @@ let suppressClickKey = '';
 let clickSequence = null;
 let replacementTarget = null;
 let settingsPanelInstalling = false;
+let settingsPanelUnavailable = false;
 let mutationFrame = 0;
 const mutationImages = new Set();
+const templateCache = new Map();
+
+async function loadOwnTemplate(name) {
+    if (templateCache.has(name)) {
+        return templateCache.get(name);
+    }
+
+    const templateUrl = new URL(`./${name}.html`, import.meta.url);
+    const response = await fetch(templateUrl);
+    if (!response.ok) {
+        throw new Error(`Unable to load ${name}.html (${response.status})`);
+    }
+
+    const html = await response.text();
+    if (!html.trim()) {
+        throw new Error(`${name}.html is empty`);
+    }
+
+    templateCache.set(name, html);
+    return html;
+}
 
 function getSettings() {
     if (!extension_settings[MODULE_NAME] || typeof extension_settings[MODULE_NAME] !== 'object') {
@@ -1118,7 +1139,7 @@ function clearAllSavedPositions() {
 }
 
 async function installSettingsPanel() {
-    if (settingsPanelInstalling || document.getElementById('stafe_settings')) {
+    if (settingsPanelInstalling || settingsPanelUnavailable || document.getElementById('stafe_settings')) {
         return;
     }
     const target = document.querySelector('#extensions_settings2, #extensions_settings');
@@ -1127,7 +1148,7 @@ async function installSettingsPanel() {
     }
     settingsPanelInstalling = true;
     try {
-        const html = await renderExtensionTemplateAsync(RESOURCE_NAME, 'settings');
+        const html = await loadOwnTemplate('settings');
         target.insertAdjacentHTML('beforeend', html);
         const enabled = document.getElementById('stafe_enabled');
         const tripleClickEnabled = document.getElementById('stafe_triple_click_enabled');
@@ -1163,6 +1184,7 @@ async function installSettingsPanel() {
         document.getElementById('stafe_clear_all')?.addEventListener('click', clearAllSavedPositions);
         updateSavedCount();
     } catch (error) {
+        settingsPanelUnavailable = true;
         console.error('[Avatar Focus] Failed to install settings panel:', error);
     } finally {
         settingsPanelInstalling = false;
@@ -1173,7 +1195,7 @@ async function installEditor() {
     if (document.getElementById('stafe_editor')) {
         return;
     }
-    const html = await renderExtensionTemplateAsync(RESOURCE_NAME, 'editor');
+    const html = await loadOwnTemplate('editor');
     document.body.insertAdjacentHTML('beforeend', html);
     bindEditor();
 }
