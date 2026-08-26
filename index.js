@@ -129,6 +129,24 @@ function roundZoom(value) {
     return Math.round(clamp(value, MIN_ZOOM, MAX_ZOOM));
 }
 
+function getZoomClipPath(position) {
+    const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
+    if (zoom <= DEFAULT_ZOOM) {
+        return null;
+    }
+
+    const insetRange = 100 * (1 - DEFAULT_ZOOM / zoom);
+    const x = roundPosition(position.x) / 100;
+    const y = roundPosition(position.y) / 100;
+    const values = [
+        y * insetRange,
+        (1 - x) * insetRange,
+        (1 - y) * insetRange,
+        x * insetRange,
+    ].map((value) => Math.round(value * 1000) / 1000);
+    return `inset(${values[0]}% ${values[1]}% ${values[2]}% ${values[3]}%)`;
+}
+
 function safeDecode(value) {
     try {
         return decodeURIComponent(value);
@@ -332,6 +350,8 @@ function rememberOriginalPosition(image) {
             scalePriority: image.style.getPropertyPriority('scale'),
             originValue: image.style.getPropertyValue('transform-origin'),
             originPriority: image.style.getPropertyPriority('transform-origin'),
+            clipValue: image.style.getPropertyValue('clip-path'),
+            clipPriority: image.style.getPropertyPriority('clip-path'),
         });
     }
 }
@@ -350,6 +370,7 @@ function restoreImagePosition(image) {
     restoreOriginalProperty(image, 'object-position', original.value, original.priority);
     restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
     restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
 }
 
 function setImagePosition(image, position) {
@@ -364,6 +385,7 @@ function setImagePosition(image, position) {
     if (zoom === DEFAULT_ZOOM) {
         restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
         restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+        restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
     } else {
         image.style.setProperty('scale', String(zoom / 100), 'important');
         image.style.setProperty(
@@ -371,6 +393,12 @@ function setImagePosition(image, position) {
             roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
             'important',
         );
+        const clipPath = getZoomClipPath(position);
+        if (clipPath) {
+            image.style.setProperty('clip-path', clipPath, 'important');
+        } else {
+            restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+        }
     }
 }
 
@@ -769,6 +797,12 @@ function renderEditorPosition(position, applyLive = true) {
     preview.style.setProperty('object-position', clean.x + '% ' + clean.y + '%', 'important');
     preview.style.setProperty('scale', String(clean.zoom / 100), 'important');
     preview.style.setProperty('transform-origin', clean.x + '% ' + clean.y + '%', 'important');
+    const previewClipPath = getZoomClipPath(clean);
+    if (previewClipPath) {
+        preview.style.setProperty('clip-path', previewClipPath, 'important');
+    } else {
+        preview.style.removeProperty('clip-path');
+    }
     xInput.value = String(clean.x);
     yInput.value = String(clean.y);
     zoomInput.value = String(clean.zoom);
