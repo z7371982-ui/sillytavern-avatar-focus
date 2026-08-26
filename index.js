@@ -32,6 +32,9 @@ const DEFAULTS = Object.freeze({
     positions: {},
 });
 const TRIPLE_CLICK_WINDOW_MS = 420;
+const MIN_ZOOM = 50;
+const MAX_ZOOM = 300;
+const DEFAULT_ZOOM = 100;
 
 const originalObjectPositions = new WeakMap();
 const replayedClicks = new WeakSet();
@@ -110,11 +113,20 @@ function cleanPosition(value) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
         return null;
     }
-    return { x: clamp(x), y: clamp(y) };
+    const zoom = Number(value.zoom);
+    return {
+        x: clamp(x),
+        y: clamp(y),
+        zoom: Number.isFinite(zoom) ? clamp(zoom, MIN_ZOOM, MAX_ZOOM) : DEFAULT_ZOOM,
+    };
 }
 
 function roundPosition(value) {
     return Math.round(clamp(value) * 10) / 10;
+}
+
+function roundZoom(value) {
+    return Math.round(clamp(value, MIN_ZOOM, MAX_ZOOM));
 }
 
 function safeDecode(value) {
@@ -316,27 +328,50 @@ function rememberOriginalPosition(image) {
         originalObjectPositions.set(image, {
             value: image.style.getPropertyValue('object-position'),
             priority: image.style.getPropertyPriority('object-position'),
+            scaleValue: image.style.getPropertyValue('scale'),
+            scalePriority: image.style.getPropertyPriority('scale'),
+            originValue: image.style.getPropertyValue('transform-origin'),
+            originPriority: image.style.getPropertyPriority('transform-origin'),
         });
+    }
+}
+
+function restoreOriginalProperty(image, name, value, priority) {
+    if (value) {
+        image.style.setProperty(name, value, priority);
+    } else {
+        image.style.removeProperty(name);
     }
 }
 
 function restoreImagePosition(image) {
     rememberOriginalPosition(image);
     const original = originalObjectPositions.get(image);
-    if (original.value) {
-        image.style.setProperty('object-position', original.value, original.priority);
-    } else {
-        image.style.removeProperty('object-position');
-    }
+    restoreOriginalProperty(image, 'object-position', original.value, original.priority);
+    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
 }
 
 function setImagePosition(image, position) {
     rememberOriginalPosition(image);
+    const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
     image.style.setProperty(
         'object-position',
         roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
         'important',
     );
+    const original = originalObjectPositions.get(image);
+    if (zoom === DEFAULT_ZOOM) {
+        restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+        restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+    } else {
+        image.style.setProperty('scale', String(zoom / 100), 'important');
+        image.style.setProperty(
+            'transform-origin',
+            roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
+            'important',
+        );
+    }
 }
 
 function applySavedPosition(image) {
@@ -407,11 +442,12 @@ function readComputedPosition(image) {
     const tokens = getComputedStyle(image).objectPosition.trim().split(/\s+/);
     if (tokens.length === 1) {
         const value = parsePositionToken(tokens[0], 'x');
-        return { x: value, y: value };
+        return { x: value, y: value, zoom: DEFAULT_ZOOM };
     }
     return {
         x: parsePositionToken(tokens[0], 'x'),
         y: parsePositionToken(tokens[1], 'y'),
+        zoom: DEFAULT_ZOOM,
     };
 }
 
@@ -717,18 +753,28 @@ function renderEditorPosition(position, applyLive = true) {
     if (!editorState) {
         return;
     }
-    const clean = { x: roundPosition(position.x), y: roundPosition(position.y) };
+    const clean = {
+        x: roundPosition(position.x),
+        y: roundPosition(position.y),
+        zoom: roundZoom(position.zoom ?? DEFAULT_ZOOM),
+    };
     editorState.draft = clean;
     const preview = document.getElementById('stafe_preview_image');
     const xInput = document.getElementById('stafe_x_position');
     const yInput = document.getElementById('stafe_y_position');
+    const zoomInput = document.getElementById('stafe_zoom');
     const xValue = document.getElementById('stafe_x_value');
     const yValue = document.getElementById('stafe_y_value');
+    const zoomValue = document.getElementById('stafe_zoom_value');
     preview.style.setProperty('object-position', clean.x + '% ' + clean.y + '%', 'important');
+    preview.style.setProperty('scale', String(clean.zoom / 100), 'important');
+    preview.style.setProperty('transform-origin', clean.x + '% ' + clean.y + '%', 'important');
     xInput.value = String(clean.x);
     yInput.value = String(clean.y);
+    zoomInput.value = String(clean.zoom);
     xValue.textContent = Math.round(clean.x) + '%';
     yValue.textContent = Math.round(clean.y) + '%';
+    zoomValue.textContent = clean.zoom + '%';
     if (applyLive) {
         applyPositionForKey(editorState.key, clean);
     }
@@ -789,11 +835,12 @@ function closeEditor(commit) {
         getSettings().positions[state.key] = {
             x: roundPosition(state.draft.x),
             y: roundPosition(state.draft.y),
+            zoom: roundZoom(state.draft.zoom),
         };
         applyPositionForKey(state.key, state.draft);
         saveSettingsDebounced();
         updateSavedCount();
-        notify('success', '头像位置已保存。');
+        notify('success', '头像位置与缩放已保存。');
     } else {
         applyPositionForKey(state.key, state.initialSaved);
     }
@@ -806,7 +853,7 @@ function closeEditor(commit) {
     editorState = null;
 }
 
-function calculatePreviewOverflow(frame, image) {
+function calculatePreviewOverflow(frame, image, zoom = DEFAULT_ZOOM) {
     const width = frame.clientWidth;
     const height = frame.clientHeight;
     const naturalWidth = image.naturalWidth || width;
@@ -820,13 +867,18 @@ function calculatePreviewOverflow(frame, image) {
     } else if (fit === 'scale-down') {
         scale = Math.min(1, Math.min(width / naturalWidth, height / naturalHeight));
     } else if (fit === 'fill') {
-        return { x: 0, y: 0 };
+        const zoomScale = roundZoom(zoom) / 100;
+        return {
+            x: Math.max(0, width * zoomScale - width),
+            y: Math.max(0, height * zoomScale - height),
+        };
     } else {
         scale = Math.max(width / naturalWidth, height / naturalHeight);
     }
+    const zoomScale = roundZoom(zoom) / 100;
     return {
-        x: Math.max(0, naturalWidth * scale - width),
-        y: Math.max(0, naturalHeight * scale - height),
+        x: Math.max(0, naturalWidth * scale * zoomScale - width),
+        y: Math.max(0, naturalHeight * scale * zoomScale - height),
     };
 }
 
@@ -836,7 +888,8 @@ function bindEditor() {
     const preview = document.getElementById('stafe_preview_image');
     const xInput = document.getElementById('stafe_x_position');
     const yInput = document.getElementById('stafe_y_position');
-    if (!editor || !frame || !preview || !xInput || !yInput) {
+    const zoomInput = document.getElementById('stafe_zoom');
+    if (!editor || !frame || !preview || !xInput || !yInput || !zoomInput) {
         return;
     }
 
@@ -847,18 +900,35 @@ function bindEditor() {
         } else if (action === 'cancel') {
             closeEditor(false);
         } else if (action === 'center') {
-            renderEditorPosition({ x: 50, y: 50 });
+            renderEditorPosition({ x: 50, y: 50, zoom: editorState.draft.zoom });
         }
     });
 
     xInput.addEventListener('input', () => {
         if (editorState) {
-            renderEditorPosition({ x: Number(xInput.value), y: editorState.draft.y });
+            renderEditorPosition({
+                x: Number(xInput.value),
+                y: editorState.draft.y,
+                zoom: editorState.draft.zoom,
+            });
         }
     });
     yInput.addEventListener('input', () => {
         if (editorState) {
-            renderEditorPosition({ x: editorState.draft.x, y: Number(yInput.value) });
+            renderEditorPosition({
+                x: editorState.draft.x,
+                y: Number(yInput.value),
+                zoom: editorState.draft.zoom,
+            });
+        }
+    });
+    zoomInput.addEventListener('input', () => {
+        if (editorState) {
+            renderEditorPosition({
+                x: editorState.draft.x,
+                y: editorState.draft.y,
+                zoom: Number(zoomInput.value),
+            });
         }
     });
 
@@ -867,7 +937,7 @@ function bindEditor() {
             return;
         }
         event.preventDefault();
-        const overflow = calculatePreviewOverflow(frame, preview);
+        const overflow = calculatePreviewOverflow(frame, preview, editorState.draft.zoom);
         editorState.drag = {
             pointerId: event.pointerId,
             startClientX: event.clientX,
@@ -893,6 +963,7 @@ function bindEditor() {
         const next = {
             x: drag.overflow.x > 0.5 ? drag.startX - (deltaX / denominatorX) * 100 : drag.startX,
             y: drag.overflow.y > 0.5 ? drag.startY - (deltaY / denominatorY) * 100 : drag.startY,
+            zoom: editorState.draft.zoom,
         };
         renderEditorPosition(next);
     });
