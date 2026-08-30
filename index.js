@@ -41,7 +41,8 @@ const LIBRARY_STORE_NAME = 'images';
 const LIBRARY_DB_VERSION = 1;
 
 const originalObjectPositions = new WeakMap();
-const zoomBackdropStates = new WeakMap();
+const zoomLibrarySources = new Map();
+const zoomLibrarySourcePromises = new Map();
 const replayedClicks = new WeakSet();
 let editorState = null;
 let pendingPress = null;
@@ -127,6 +128,19 @@ async function getGalleryRecords(ownerKey) {
             resolve(records);
         };
         request.onerror = () => reject(request.error || new Error('头像库读取失败。'));
+    });
+}
+
+async function getGalleryRecord(id) {
+    if (!id) {
+        return null;
+    }
+    const database = await openGalleryDatabase();
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction(LIBRARY_STORE_NAME, 'readonly');
+        const request = transaction.objectStore(LIBRARY_STORE_NAME).get(id);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error || new Error('头像原图读取失败。'));
     });
 }
 
@@ -451,6 +465,102 @@ function findAvatarFeedbackElement(target, image) {
     return image;
 }
 
+function loadZoomLibrarySource(record) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(record.blob);
+        const probe = new Image();
+        probe.onload = () => resolve({
+            recordId: record.id,
+            url,
+            width: probe.naturalWidth,
+            height: probe.naturalHeight,
+        });
+        probe.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('无法读取头像库原图'));
+        };
+        probe.src = url;
+    });
+}
+
+function releaseZoomLibrarySource(key) {
+    const cached = zoomLibrarySources.get(key);
+    zoomLibrarySources.delete(key);
+    zoomLibrarySourcePromises.delete(key);
+    if (cached?.url) {
+        URL.revokeObjectURL(cached.url);
+    }
+}
+
+async function prepareZoomLibrarySource(key, preferredRecord = null) {
+    const activeId = getSettings().libraryActive[key] || '';
+    if (!key.startsWith('persona:') || !activeId) {
+        releaseZoomLibrarySource(key);
+        return null;
+    }
+    const cached = zoomLibrarySources.get(key);
+    if (cached?.recordId === activeId) {
+        return cached;
+    }
+    const pending = zoomLibrarySourcePromises.get(key);
+    if (pending?.recordId === activeId) {
+        return pending.promise;
+    }
+
+    const promise = (async () => {
+        const record = preferredRecord?.id === activeId
+            ? preferredRecord
+            : await getGalleryRecord(activeId);
+        if (!record || record.ownerKey !== key || !(record.blob instanceof Blob)) {
+            return null;
+        }
+        const source = await loadZoomLibrarySource(record);
+        if (getSettings().libraryActive[key] !== activeId) {
+            URL.revokeObjectURL(source.url);
+            return null;
+        }
+        const previous = zoomLibrarySources.get(key);
+        zoomLibrarySources.set(key, source);
+        if (previous?.url && previous.url !== source.url) {
+            URL.revokeObjectURL(previous.url);
+        }
+        const livePosition = editorState?.key === key
+            ? editorState.position
+            : cleanPosition(getSettings().positions[key]);
+        if (livePosition) {
+            applyPositionForKey(key, livePosition);
+        }
+        return source;
+    })().catch((error) => {
+        console.warn('[Avatar Focus] Could not prepare the full avatar image for zooming:', error);
+        return null;
+    }).finally(() => {
+        if (zoomLibrarySourcePromises.get(key)?.promise === promise) {
+            zoomLibrarySourcePromises.delete(key);
+        }
+    });
+    zoomLibrarySourcePromises.set(key, { recordId: activeId, promise });
+    return promise;
+}
+
+function getZoomSource(image) {
+    const key = getImageKey(image);
+    const activeId = getSettings().libraryActive[key] || '';
+    const cached = zoomLibrarySources.get(key);
+    if (key.startsWith('persona:') && activeId) {
+        if (cached?.recordId === activeId) {
+            return cached;
+        }
+        void prepareZoomLibrarySource(key);
+    }
+    return {
+        recordId: '',
+        url: image.currentSrc || image.getAttribute('src') || image.src || '',
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+    };
+}
+
 function rememberOriginalPosition(image) {
     if (!originalObjectPositions.has(image)) {
         originalObjectPositions.set(image, {
@@ -462,6 +572,16 @@ function rememberOriginalPosition(image) {
             originPriority: image.style.getPropertyPriority('transform-origin'),
             clipValue: image.style.getPropertyValue('clip-path'),
             clipPriority: image.style.getPropertyPriority('clip-path'),
+            fitValue: image.style.getPropertyValue('object-fit'),
+            fitPriority: image.style.getPropertyPriority('object-fit'),
+            backgroundImageValue: image.style.getPropertyValue('background-image'),
+            backgroundImagePriority: image.style.getPropertyPriority('background-image'),
+            backgroundSizeValue: image.style.getPropertyValue('background-size'),
+            backgroundSizePriority: image.style.getPropertyPriority('background-size'),
+            backgroundPositionValue: image.style.getPropertyValue('background-position'),
+            backgroundPositionPriority: image.style.getPropertyPriority('background-position'),
+            backgroundRepeatValue: image.style.getPropertyValue('background-repeat'),
+            backgroundRepeatPriority: image.style.getPropertyPriority('background-repeat'),
         });
     }
 }
@@ -474,76 +594,6 @@ function restoreOriginalProperty(image, name, value, priority) {
     }
 }
 
-function removeZoomBackdrop(image) {
-    const state = zoomBackdropStates.get(image);
-    if (!state) {
-        return;
-    }
-    state.backdrop.remove();
-    restoreOriginalProperty(
-        state.host,
-        'position',
-        state.hostPositionValue,
-        state.hostPositionPriority,
-    );
-    restoreOriginalProperty(
-        state.host,
-        'isolation',
-        state.hostIsolationValue,
-        state.hostIsolationPriority,
-    );
-    zoomBackdropStates.delete(image);
-}
-
-function updateZoomBackdrop(image, position, zoom) {
-    if (zoom >= DEFAULT_ZOOM || !(image.parentElement instanceof HTMLElement)) {
-        removeZoomBackdrop(image);
-        return;
-    }
-
-    const host = image.parentElement;
-    let state = zoomBackdropStates.get(image);
-    if (state?.host !== host) {
-        removeZoomBackdrop(image);
-        state = null;
-    }
-    if (!state) {
-        const backdrop = document.createElement('span');
-        backdrop.className = 'stafe-zoom-backdrop';
-        backdrop.setAttribute('aria-hidden', 'true');
-        host.insertBefore(backdrop, image);
-        state = {
-            host,
-            backdrop,
-            hostPositionValue: host.style.getPropertyValue('position'),
-            hostPositionPriority: host.style.getPropertyPriority('position'),
-            hostIsolationValue: host.style.getPropertyValue('isolation'),
-            hostIsolationPriority: host.style.getPropertyPriority('isolation'),
-        };
-        zoomBackdropStates.set(image, state);
-    }
-
-    if (getComputedStyle(host).position === 'static') {
-        host.style.setProperty('position', 'relative', 'important');
-    }
-    host.style.setProperty('isolation', 'isolate', 'important');
-    const source = image.currentSrc || image.getAttribute('src') || image.src || '';
-    const computed = getComputedStyle(image);
-    const backdrop = state.backdrop;
-    backdrop.style.left = image.offsetLeft + 'px';
-    backdrop.style.top = image.offsetTop + 'px';
-    backdrop.style.width = image.offsetWidth + 'px';
-    backdrop.style.height = image.offsetHeight + 'px';
-    backdrop.style.backgroundImage = `url("${String(source).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")`;
-    backdrop.style.backgroundPosition = roundPosition(position.x) + '% ' + roundPosition(position.y) + '%';
-    backdrop.style.borderRadius = computed.borderRadius;
-    backdrop.style.clipPath = computed.clipPath;
-    backdrop.style.maskImage = computed.maskImage;
-    backdrop.style.maskSize = computed.maskSize;
-    backdrop.style.maskPosition = computed.maskPosition;
-    backdrop.style.maskRepeat = computed.maskRepeat;
-}
-
 function restoreImagePosition(image) {
     rememberOriginalPosition(image);
     const original = originalObjectPositions.get(image);
@@ -551,7 +601,57 @@ function restoreImagePosition(image) {
     restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
     restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
     restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
-    removeZoomBackdrop(image);
+    restoreOriginalProperty(image, 'object-fit', original.fitValue, original.fitPriority);
+    restoreOriginalProperty(image, 'background-image', original.backgroundImageValue, original.backgroundImagePriority);
+    restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
+    restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
+    restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
+}
+
+function restoreZoomOutRendering(image, original) {
+    restoreOriginalProperty(image, 'object-fit', original.fitValue, original.fitPriority);
+    restoreOriginalProperty(image, 'background-image', original.backgroundImageValue, original.backgroundImagePriority);
+    restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
+    restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
+    restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
+}
+
+function zoomCssUrl(source) {
+    const escaped = String(source)
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/[\n\r\f]/g, '');
+    return `url("${escaped}")`;
+}
+
+function setZoomOutRendering(image, position, zoom, original) {
+    const source = getZoomSource(image);
+    const boxWidth = image.clientWidth || image.getBoundingClientRect().width;
+    const boxHeight = image.clientHeight || image.getBoundingClientRect().height;
+    if (!source.url || !source.width || !source.height || !boxWidth || !boxHeight) {
+        return false;
+    }
+
+    const coverScale = Math.max(boxWidth / source.width, boxHeight / source.height);
+    const containScale = Math.min(boxWidth / source.width, boxHeight / source.height);
+    const progress = (zoom - MIN_ZOOM) / (DEFAULT_ZOOM - MIN_ZOOM);
+    const renderScale = containScale + (coverScale - containScale) * progress;
+    const renderedWidth = Math.round(source.width * renderScale * 1000) / 1000;
+    const renderedHeight = Math.round(source.height * renderScale * 1000) / 1000;
+    const x = roundPosition(position.x);
+    const y = roundPosition(position.y);
+    const layer = zoomCssUrl(source.url);
+
+    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+    image.style.setProperty('object-fit', 'none', 'important');
+    image.style.setProperty('object-position', '-100000px -100000px', 'important');
+    image.style.setProperty('background-image', `${layer}, ${layer}`, 'important');
+    image.style.setProperty('background-size', `${renderedWidth}px ${renderedHeight}px, cover`, 'important');
+    image.style.setProperty('background-position', `${x}% ${y}%, ${x}% ${y}%`, 'important');
+    image.style.setProperty('background-repeat', 'no-repeat', 'important');
+    return true;
 }
 
 function setImagePosition(image, position) {
@@ -563,6 +663,16 @@ function setImagePosition(image, position) {
         'important',
     );
     const original = originalObjectPositions.get(image);
+    if (zoom < DEFAULT_ZOOM && setZoomOutRendering(image, position, zoom, original)) {
+        return;
+    }
+
+    restoreZoomOutRendering(image, original);
+    image.style.setProperty(
+        'object-position',
+        roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
+        'important',
+    );
     if (zoom === DEFAULT_ZOOM) {
         restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
         restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
@@ -581,7 +691,6 @@ function setImagePosition(image, position) {
             restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
         }
     }
-    updateZoomBackdrop(image, position, zoom);
 }
 
 function applySavedPosition(image) {
@@ -770,7 +879,7 @@ async function replaceCharacterAvatar(file, target = replacementTarget) {
     }
 }
 
-function loadAvatarSourceImage(file) {
+function loadPersonaSourceImage(file) {
     return new Promise((resolve, reject) => {
         const objectUrl = URL.createObjectURL(file);
         const image = new Image();
@@ -783,7 +892,7 @@ function loadAvatarSourceImage(file) {
     });
 }
 
-function canvasToPngFile(canvas) {
+function personaCanvasToFile(canvas) {
     return new Promise((resolve, reject) => {
         canvas.toBlob((blob) => {
             if (!blob) {
@@ -798,8 +907,8 @@ function canvasToPngFile(canvas) {
     });
 }
 
-async function preparePersonaAvatarFile(file) {
-    const { image, objectUrl } = await loadAvatarSourceImage(file);
+async function preparePersonaCoverFile(file) {
+    const { image, objectUrl } = await loadPersonaSourceImage(file);
     try {
         const sourceWidth = image.naturalWidth;
         const sourceHeight = image.naturalHeight;
@@ -807,9 +916,10 @@ async function preparePersonaAvatarFile(file) {
             throw new Error('无法读取头像尺寸');
         }
 
-        // The persona endpoint always stores 2:3 avatars. Build that ratio
-        // before uploading: a full, undistorted image over a same-image cover
-        // layer. This keeps every edge while avoiding white letterbox bars.
+        // Persona files are forced to 400 x 600 by the backend. Produce a
+        // proportional 2:3 cover first so the default 100% view fills its
+        // frame without stretching. The uncut source remains in IndexedDB and
+        // is used by setZoomOutRendering below 100%.
         const canvas = document.createElement('canvas');
         canvas.width = 800;
         canvas.height = 1200;
@@ -817,35 +927,17 @@ async function preparePersonaAvatarFile(file) {
         if (!context) {
             throw new Error('当前浏览器无法处理头像');
         }
-
-        context.fillStyle = '#202020';
-        context.fillRect(0, 0, canvas.width, canvas.height);
-
-        const coverScale = Math.max(canvas.width / sourceWidth, canvas.height / sourceHeight) * 1.08;
-        const coverWidth = sourceWidth * coverScale;
-        const coverHeight = sourceHeight * coverScale;
-        context.save();
-        context.filter = 'blur(28px) saturate(0.9) brightness(0.82)';
+        const scale = Math.max(canvas.width / sourceWidth, canvas.height / sourceHeight);
+        const width = sourceWidth * scale;
+        const height = sourceHeight * scale;
         context.drawImage(
             image,
-            (canvas.width - coverWidth) / 2,
-            (canvas.height - coverHeight) / 2,
-            coverWidth,
-            coverHeight,
+            (canvas.width - width) / 2,
+            (canvas.height - height) / 2,
+            width,
+            height,
         );
-        context.restore();
-
-        const containScale = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight);
-        const containWidth = sourceWidth * containScale;
-        const containHeight = sourceHeight * containScale;
-        context.drawImage(
-            image,
-            (canvas.width - containWidth) / 2,
-            (canvas.height - containHeight) / 2,
-            containWidth,
-            containHeight,
-        );
-        return await canvasToPngFile(canvas);
+        return await personaCanvasToFile(canvas);
     } finally {
         URL.revokeObjectURL(objectUrl);
     }
@@ -857,7 +949,7 @@ async function replacePersonaAvatar(file, target = replacementTarget) {
     }
 
     try {
-        const preparedFile = await preparePersonaAvatarFile(file);
+        const preparedFile = await preparePersonaCoverFile(file);
         const formData = new FormData();
         formData.append('avatar', preparedFile, preparedFile.name);
         formData.append('overwrite_name', target.avatarId);
@@ -1009,6 +1101,9 @@ async function saveCurrentAvatarIfLibraryEmpty() {
         if (record) {
             getSettings().libraryActive[replacementTarget.key] = record.id;
             saveSettingsDebounced();
+            if (replacementTarget.kind === 'persona') {
+                void prepareZoomLibrarySource(replacementTarget.key, record);
+            }
         }
     } catch (error) {
         console.warn('[Avatar Focus] Could not preserve the current avatar in the library:', error);
@@ -1101,6 +1196,9 @@ async function selectGalleryRecord(id = getCurrentGalleryRecord()?.id) {
         if (success) {
             getSettings().libraryActive[target.key] = record.id;
             saveSettingsDebounced();
+            if (target.kind === 'persona') {
+                void prepareZoomLibrarySource(target.key, record);
+            }
             await renderAvatarGallery();
         }
     } finally {
@@ -1127,6 +1225,7 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
         await deleteGalleryRecord(id);
         if (getSettings().libraryActive[target.key] === id) {
             delete getSettings().libraryActive[target.key];
+            releaseZoomLibrarySource(target.key);
             saveSettingsDebounced();
         }
         await renderAvatarGallery();
