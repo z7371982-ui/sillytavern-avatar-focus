@@ -332,6 +332,9 @@ function avatarCandidateScore(image) {
     ].join(' ').toLowerCase();
     let score = 0;
 
+    if (/^(?:avatar|persona):/.test(image.dataset.stafeLibraryKey || '')) {
+        score += 180;
+    }
     if (/\/thumbnail\?.*type=(avatar|persona)|\/characters\/|user[ _-]?avatars?|\/personas?\//i.test(source)) {
         score += 140;
     }
@@ -2005,15 +2008,15 @@ async function initialize() {
     } catch (error) {
         console.error('[Avatar Focus] UI initialization failed:', error);
     }
-    try {
-        await applyAllPersonaLibrarySources();
-    } catch (error) {
-        console.warn('[Avatar Focus] Could not restore saved persona library images:', error);
-    }
     applyAllSavedPositions();
     bindLongPress();
     bindTripleClickReplacement();
     observeAvatars();
+    void applyAllPersonaLibrarySources()
+        .then(applyAllSavedPositions)
+        .catch((error) => {
+            console.warn('[Avatar Focus] Could not restore saved persona library images:', error);
+        });
     console.info('[Avatar Focus] Ready. Long-press to adjust; triple-click to open avatar library.');
 }
 
