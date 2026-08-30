@@ -41,10 +41,10 @@ const LIBRARY_STORE_NAME = 'images';
 const LIBRARY_DB_VERSION = 1;
 
 const originalObjectPositions = new WeakMap();
+const zoomBackdropStates = new WeakMap();
 const replayedClicks = new WeakSet();
 let editorState = null;
 let pendingPress = null;
-let longPressBound = false;
 let suppressClickUntil = 0;
 let suppressClickKey = '';
 let clickSequence = null;
@@ -54,13 +54,11 @@ let galleryDatabasePromise = null;
 let settingsPanelInstalling = false;
 let settingsPanelUnavailable = false;
 let mutationFrame = 0;
-let layoutFrame = 0;
 const mutationImages = new Set();
 const templateCache = new Map();
 const galleryEntries = new Map();
 const galleryRecordOrder = [];
 const galleryObjectUrls = [];
-const personaLibrarySources = new Map();
 let galleryCursor = 0;
 let galleryPendingSelectionId = '';
 
@@ -129,19 +127,6 @@ async function getGalleryRecords(ownerKey) {
             resolve(records);
         };
         request.onerror = () => reject(request.error || new Error('头像库读取失败。'));
-    });
-}
-
-async function getGalleryRecord(id) {
-    if (!id) {
-        return null;
-    }
-    const database = await openGalleryDatabase();
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(LIBRARY_STORE_NAME, 'readonly');
-        const request = transaction.objectStore(LIBRARY_STORE_NAME).get(id);
-        request.onsuccess = () => resolve(request.result || null);
-        request.onerror = () => reject(request.error || new Error('头像图片读取失败。'));
     });
 }
 
@@ -254,6 +239,24 @@ function roundZoom(value) {
     return Math.round(clamp(value, MIN_ZOOM, MAX_ZOOM));
 }
 
+function getZoomClipPath(position) {
+    const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
+    if (zoom <= DEFAULT_ZOOM) {
+        return null;
+    }
+
+    const insetRange = 100 * (1 - DEFAULT_ZOOM / zoom);
+    const x = roundPosition(position.x) / 100;
+    const y = roundPosition(position.y) / 100;
+    const values = [
+        y * insetRange,
+        (1 - x) * insetRange,
+        (1 - y) * insetRange,
+        x * insetRange,
+    ].map((value) => Math.round(value * 1000) / 1000);
+    return `inset(${values[0]}% ${values[1]}% ${values[2]}% ${values[3]}%)`;
+}
+
 function safeDecode(value) {
     try {
         return decodeURIComponent(value);
@@ -275,10 +278,6 @@ function getImageKey(image) {
     const source = image.getAttribute('src') || image.currentSrc || image.src || '';
     if (!source) {
         return '';
-    }
-    if (image.dataset.stafeLibraryKey
-        && image.dataset.stafeLibrarySource === source) {
-        return image.dataset.stafeLibraryKey;
     }
     if (source.startsWith('data:') || source.startsWith('blob:')) {
         return 'embedded:' + smallHash(source);
@@ -333,9 +332,6 @@ function avatarCandidateScore(image) {
     ].join(' ').toLowerCase();
     let score = 0;
 
-    if (/^(?:avatar|persona):/.test(image.dataset.stafeLibraryKey || '')) {
-        score += 180;
-    }
     if (/\/thumbnail\?.*type=(avatar|persona)|\/characters\/|user[ _-]?avatars?|\/personas?\//i.test(source)) {
         score += 140;
     }
@@ -466,16 +462,6 @@ function rememberOriginalPosition(image) {
             originPriority: image.style.getPropertyPriority('transform-origin'),
             clipValue: image.style.getPropertyValue('clip-path'),
             clipPriority: image.style.getPropertyPriority('clip-path'),
-            fitValue: image.style.getPropertyValue('object-fit'),
-            fitPriority: image.style.getPropertyPriority('object-fit'),
-            backgroundImageValue: image.style.getPropertyValue('background-image'),
-            backgroundImagePriority: image.style.getPropertyPriority('background-image'),
-            backgroundSizeValue: image.style.getPropertyValue('background-size'),
-            backgroundSizePriority: image.style.getPropertyPriority('background-size'),
-            backgroundPositionValue: image.style.getPropertyValue('background-position'),
-            backgroundPositionPriority: image.style.getPropertyPriority('background-position'),
-            backgroundRepeatValue: image.style.getPropertyValue('background-repeat'),
-            backgroundRepeatPriority: image.style.getPropertyPriority('background-repeat'),
         });
     }
 }
@@ -488,6 +474,76 @@ function restoreOriginalProperty(image, name, value, priority) {
     }
 }
 
+function removeZoomBackdrop(image) {
+    const state = zoomBackdropStates.get(image);
+    if (!state) {
+        return;
+    }
+    state.backdrop.remove();
+    restoreOriginalProperty(
+        state.host,
+        'position',
+        state.hostPositionValue,
+        state.hostPositionPriority,
+    );
+    restoreOriginalProperty(
+        state.host,
+        'isolation',
+        state.hostIsolationValue,
+        state.hostIsolationPriority,
+    );
+    zoomBackdropStates.delete(image);
+}
+
+function updateZoomBackdrop(image, position, zoom) {
+    if (zoom >= DEFAULT_ZOOM || !(image.parentElement instanceof HTMLElement)) {
+        removeZoomBackdrop(image);
+        return;
+    }
+
+    const host = image.parentElement;
+    let state = zoomBackdropStates.get(image);
+    if (state?.host !== host) {
+        removeZoomBackdrop(image);
+        state = null;
+    }
+    if (!state) {
+        const backdrop = document.createElement('span');
+        backdrop.className = 'stafe-zoom-backdrop';
+        backdrop.setAttribute('aria-hidden', 'true');
+        host.insertBefore(backdrop, image);
+        state = {
+            host,
+            backdrop,
+            hostPositionValue: host.style.getPropertyValue('position'),
+            hostPositionPriority: host.style.getPropertyPriority('position'),
+            hostIsolationValue: host.style.getPropertyValue('isolation'),
+            hostIsolationPriority: host.style.getPropertyPriority('isolation'),
+        };
+        zoomBackdropStates.set(image, state);
+    }
+
+    if (getComputedStyle(host).position === 'static') {
+        host.style.setProperty('position', 'relative', 'important');
+    }
+    host.style.setProperty('isolation', 'isolate', 'important');
+    const source = image.currentSrc || image.getAttribute('src') || image.src || '';
+    const computed = getComputedStyle(image);
+    const backdrop = state.backdrop;
+    backdrop.style.left = image.offsetLeft + 'px';
+    backdrop.style.top = image.offsetTop + 'px';
+    backdrop.style.width = image.offsetWidth + 'px';
+    backdrop.style.height = image.offsetHeight + 'px';
+    backdrop.style.backgroundImage = `url("${String(source).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")`;
+    backdrop.style.backgroundPosition = roundPosition(position.x) + '% ' + roundPosition(position.y) + '%';
+    backdrop.style.borderRadius = computed.borderRadius;
+    backdrop.style.clipPath = computed.clipPath;
+    backdrop.style.maskImage = computed.maskImage;
+    backdrop.style.maskSize = computed.maskSize;
+    backdrop.style.maskPosition = computed.maskPosition;
+    backdrop.style.maskRepeat = computed.maskRepeat;
+}
+
 function restoreImagePosition(image) {
     rememberOriginalPosition(image);
     const original = originalObjectPositions.get(image);
@@ -495,81 +551,37 @@ function restoreImagePosition(image) {
     restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
     restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
     restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
-    restoreOriginalProperty(image, 'object-fit', original.fitValue, original.fitPriority);
-    restoreOriginalProperty(image, 'background-image', original.backgroundImageValue, original.backgroundImagePriority);
-    restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
-    restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
-    restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
-}
-
-function restoreZoomRendering(image, original) {
-    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
-    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
-    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
-    restoreOriginalProperty(image, 'object-fit', original.fitValue, original.fitPriority);
-    restoreOriginalProperty(image, 'background-image', original.backgroundImageValue, original.backgroundImagePriority);
-    restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
-    restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
-    restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
-}
-
-function cssUrl(source) {
-    const escaped = String(source)
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/[\n\r\f]/g, '');
-    return `url("${escaped}")`;
-}
-
-function setZoomBackground(image, position, zoom, original) {
-    const width = image.naturalWidth;
-    const height = image.naturalHeight;
-    const boxWidth = image.clientWidth || image.getBoundingClientRect().width;
-    const boxHeight = image.clientHeight || image.getBoundingClientRect().height;
-    const source = image.currentSrc || image.getAttribute('src') || image.src || '';
-    if (!image.complete || !width || !height || !boxWidth || !boxHeight || !source) {
-        image.addEventListener('load', () => applySavedPosition(image), { once: true });
-        restoreZoomRendering(image, original);
-        return;
-    }
-
-    const coverScale = Math.max(boxWidth / width, boxHeight / height);
-    const containScale = Math.min(boxWidth / width, boxHeight / height);
-    const zoomScale = zoom < DEFAULT_ZOOM
-        ? containScale + (coverScale - containScale)
-            * ((zoom - MIN_ZOOM) / (DEFAULT_ZOOM - MIN_ZOOM))
-        : coverScale * (zoom / DEFAULT_ZOOM);
-    const renderedWidth = Math.round(width * zoomScale * 1000) / 1000;
-    const renderedHeight = Math.round(height * zoomScale * 1000) / 1000;
-    const x = roundPosition(position.x);
-    const y = roundPosition(position.y);
-    const sourceLayer = cssUrl(source);
-
-    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
-    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
-    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
-    image.style.setProperty('object-fit', 'none', 'important');
-    image.style.setProperty('object-position', '-100000px -100000px', 'important');
-    image.style.setProperty('background-image', `${sourceLayer}, ${sourceLayer}`, 'important');
-    image.style.setProperty('background-size', `${renderedWidth}px ${renderedHeight}px, cover`, 'important');
-    image.style.setProperty('background-position', `${x}% ${y}%, ${x}% ${y}%`, 'important');
-    image.style.setProperty('background-repeat', 'no-repeat', 'important');
+    removeZoomBackdrop(image);
 }
 
 function setImagePosition(image, position) {
     rememberOriginalPosition(image);
     const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
+    image.style.setProperty(
+        'object-position',
+        roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
+        'important',
+    );
     const original = originalObjectPositions.get(image);
     if (zoom === DEFAULT_ZOOM) {
-        restoreZoomRendering(image, original);
+        restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+        restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+        restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+    } else {
+        image.style.setProperty('scale', String(zoom / 100), 'important');
         image.style.setProperty(
-            'object-position',
+            'transform-origin',
             roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
             'important',
         );
-    } else {
-        setZoomBackground(image, position, zoom, original);
+        const clipPath = getZoomClipPath(position);
+        if (clipPath) {
+            image.style.setProperty('clip-path', clipPath, 'important');
+        } else {
+            restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+        }
     }
+    updateZoomBackdrop(image, position, zoom);
 }
 
 function applySavedPosition(image) {
@@ -598,16 +610,6 @@ function forEachAvatar(callback) {
 
 function applyAllSavedPositions() {
     forEachAvatar(applySavedPosition);
-}
-
-function scheduleAvatarLayoutRefresh() {
-    if (layoutFrame) {
-        return;
-    }
-    layoutFrame = requestAnimationFrame(() => {
-        layoutFrame = 0;
-        applyAllSavedPositions();
-    });
 }
 
 function restoreAllPositions() {
@@ -768,161 +770,114 @@ async function replaceCharacterAvatar(file, target = replacementTarget) {
     }
 }
 
-function clearPersonaLibraryMetadata(image) {
-    delete image.dataset.stafeLibraryKey;
-    delete image.dataset.stafeLibrarySource;
-    delete image.dataset.stafeLibraryCoreSource;
-    delete image.dataset.stafeLibraryCoreSrcset;
-    delete image.dataset.stafeLibraryHadSrcset;
-}
-
-function restorePersonaLibrarySource(image) {
-    const librarySource = image.dataset.stafeLibrarySource || '';
-    const coreSource = image.dataset.stafeLibraryCoreSource || '';
-    const coreSrcset = image.dataset.stafeLibraryCoreSrcset || '';
-    const hadSrcset = image.dataset.stafeLibraryHadSrcset === 'true';
-    const currentSource = image.getAttribute('src') || '';
-    clearPersonaLibraryMetadata(image);
-
-    if (currentSource === librarySource && coreSource) {
-        image.src = coreSource;
-    }
-    if (hadSrcset) {
-        image.setAttribute('srcset', coreSrcset);
-    }
-}
-
-function reconcilePersonaLibrarySource(image) {
-    const librarySource = image.dataset.stafeLibrarySource || '';
-    const currentSource = image.getAttribute('src') || '';
-    if (librarySource && currentSource !== librarySource) {
-        clearPersonaLibraryMetadata(image);
-    }
-}
-
-async function preparePersonaLibrarySource(key, preferredRecord = null) {
-    const activeId = getSettings().libraryActive[key] || '';
-    if (!key.startsWith('persona:') || !activeId) {
-        return null;
-    }
-
-    const cached = personaLibrarySources.get(key);
-    if (cached?.recordId === activeId) {
-        return cached;
-    }
-
-    const record = preferredRecord?.id === activeId
-        ? preferredRecord
-        : await getGalleryRecord(activeId);
-    if (!record || record.ownerKey !== key || !(record.blob instanceof Blob)) {
-        return null;
-    }
-
-    const entry = {
-        recordId: record.id,
-        url: URL.createObjectURL(record.blob),
-    };
-    personaLibrarySources.set(key, entry);
-    if (cached?.url) {
-        window.setTimeout(() => URL.revokeObjectURL(cached.url), 1000);
-    }
-    return entry;
-}
-
-async function applyPersonaLibrarySource(image, preparedSource = null) {
-    if (!(image instanceof HTMLImageElement)) {
-        return;
-    }
-
-    reconcilePersonaLibrarySource(image);
-    const key = getImageKey(image);
-    if (!key.startsWith('persona:')) {
-        return;
-    }
-
-    const activeId = getSettings().libraryActive[key] || '';
-    if (!activeId) {
-        if (image.dataset.stafeLibraryKey) {
-            restorePersonaLibrarySource(image);
-        }
-        return;
-    }
-
-    const source = preparedSource?.recordId === activeId
-        ? preparedSource
-        : await preparePersonaLibrarySource(key);
-    if (!source || !image.isConnected) {
-        return;
-    }
-
-    const currentSource = image.getAttribute('src') || image.currentSrc || image.src || '';
-    if (currentSource === source.url && image.dataset.stafeLibraryKey === key) {
-        return;
-    }
-
-    const existingCoreSource = image.dataset.stafeLibraryCoreSource || '';
-    const existingCoreSrcset = image.dataset.stafeLibraryCoreSrcset || '';
-    const existingHadSrcset = image.dataset.stafeLibraryHadSrcset === 'true';
-    image.dataset.stafeLibraryKey = key;
-    image.dataset.stafeLibrarySource = source.url;
-    image.dataset.stafeLibraryCoreSource = existingCoreSource || currentSource;
-    image.dataset.stafeLibraryCoreSrcset = existingCoreSource
-        ? existingCoreSrcset
-        : (image.getAttribute('srcset') || '');
-    image.dataset.stafeLibraryHadSrcset = String(existingCoreSource
-        ? existingHadSrcset
-        : image.hasAttribute('srcset'));
-    image.removeAttribute('srcset');
-    image.src = source.url;
-}
-
-async function applyPersonaLibrarySourceForKey(key, record = null) {
-    const source = await preparePersonaLibrarySource(key, record);
-    if (!source) {
-        throw new Error('无法从头像库读取这张原图');
-    }
-    const images = Array.from(document.querySelectorAll(AVATAR_SELECTOR))
-        .filter((image) => image instanceof HTMLImageElement)
-        .filter((image) => {
-            reconcilePersonaLibrarySource(image);
-            return getImageKey(image) === key;
-        });
-    await Promise.all(images.map((image) => applyPersonaLibrarySource(image, source)));
-}
-
-function deactivatePersonaLibrarySource(key) {
-    const cached = personaLibrarySources.get(key);
-    personaLibrarySources.delete(key);
-    forEachAvatar((image) => {
-        if (image.dataset.stafeLibraryKey === key) {
-            restorePersonaLibrarySource(image);
-        }
+function loadAvatarSourceImage(file) {
+    return new Promise((resolve, reject) => {
+        const objectUrl = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => resolve({ image, objectUrl });
+        image.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error('无法读取这张头像图片'));
+        };
+        image.src = objectUrl;
     });
-    if (cached?.url) {
-        window.setTimeout(() => URL.revokeObjectURL(cached.url), 1000);
+}
+
+function canvasToPngFile(canvas) {
+    return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (!blob) {
+                reject(new Error('头像图片处理失败'));
+                return;
+            }
+            resolve(new File([blob], 'avatar.png', {
+                type: 'image/png',
+                lastModified: Date.now(),
+            }));
+        }, 'image/png');
+    });
+}
+
+async function preparePersonaAvatarFile(file) {
+    const { image, objectUrl } = await loadAvatarSourceImage(file);
+    try {
+        const sourceWidth = image.naturalWidth;
+        const sourceHeight = image.naturalHeight;
+        if (!sourceWidth || !sourceHeight) {
+            throw new Error('无法读取头像尺寸');
+        }
+
+        // The persona endpoint always stores 2:3 avatars. Build that ratio
+        // before uploading: a full, undistorted image over a same-image cover
+        // layer. This keeps every edge while avoiding white letterbox bars.
+        const canvas = document.createElement('canvas');
+        canvas.width = 800;
+        canvas.height = 1200;
+        const context = canvas.getContext('2d');
+        if (!context) {
+            throw new Error('当前浏览器无法处理头像');
+        }
+
+        context.fillStyle = '#202020';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        const coverScale = Math.max(canvas.width / sourceWidth, canvas.height / sourceHeight) * 1.08;
+        const coverWidth = sourceWidth * coverScale;
+        const coverHeight = sourceHeight * coverScale;
+        context.save();
+        context.filter = 'blur(28px) saturate(0.9) brightness(0.82)';
+        context.drawImage(
+            image,
+            (canvas.width - coverWidth) / 2,
+            (canvas.height - coverHeight) / 2,
+            coverWidth,
+            coverHeight,
+        );
+        context.restore();
+
+        const containScale = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight);
+        const containWidth = sourceWidth * containScale;
+        const containHeight = sourceHeight * containScale;
+        context.drawImage(
+            image,
+            (canvas.width - containWidth) / 2,
+            (canvas.height - containHeight) / 2,
+            containWidth,
+            containHeight,
+        );
+        return await canvasToPngFile(canvas);
+    } finally {
+        URL.revokeObjectURL(objectUrl);
     }
 }
 
-async function activatePersonaAvatar(record, target = replacementTarget) {
-    if (!target || target.kind !== 'persona' || !record) {
+async function replacePersonaAvatar(file, target = replacementTarget) {
+    if (!target || target.kind !== 'persona') {
         return false;
     }
 
-    const previousId = getSettings().libraryActive[target.key] || '';
-    getSettings().libraryActive[target.key] = record.id;
     try {
-        await applyPersonaLibrarySourceForKey(target.key, record);
-        saveSettingsDebounced();
-        notify('success', '“' + target.label + '”已切换为头像库原图。');
+        const preparedFile = await preparePersonaAvatarFile(file);
+        const formData = new FormData();
+        formData.append('avatar', preparedFile, preparedFile.name);
+        formData.append('overwrite_name', target.avatarId);
+        const response = await fetch('/api/avatars/upload', {
+            method: 'POST',
+            headers: getRequestHeaders({ omitContentType: true }),
+            cache: 'no-cache',
+            body: formData,
+        });
+        if (!response.ok) {
+            const details = await response.text();
+            throw new Error(details || 'HTTP ' + response.status);
+        }
+
+        bustVisibleAvatarCache(target.key);
+        notify('success', '“' + target.label + '”的头像已切换。');
         return true;
     } catch (error) {
-        if (previousId) {
-            getSettings().libraryActive[target.key] = previousId;
-        } else {
-            delete getSettings().libraryActive[target.key];
-        }
-        console.error('[Avatar Focus] Persona library activation failed:', error);
-        notify('error', '用户头像切换失败：' + (error instanceof Error ? error.message : String(error)));
+        console.error('[Avatar Focus] Persona avatar replacement failed:', error);
+        notify('error', '用户头像替换失败：' + (error instanceof Error ? error.message : String(error)));
         return false;
     }
 }
@@ -1054,9 +1009,6 @@ async function saveCurrentAvatarIfLibraryEmpty() {
         if (record) {
             getSettings().libraryActive[replacementTarget.key] = record.id;
             saveSettingsDebounced();
-            if (replacementTarget.kind === 'persona') {
-                await applyPersonaLibrarySourceForKey(replacementTarget.key, record);
-            }
         }
     } catch (error) {
         console.warn('[Avatar Focus] Could not preserve the current avatar in the library:', error);
@@ -1144,13 +1096,11 @@ async function selectGalleryRecord(id = getCurrentGalleryRecord()?.id) {
     try {
         const file = new File([record.blob], record.name || 'avatar.png', { type: record.type || record.blob.type || 'image/png' });
         const success = target.kind === 'persona'
-            ? await activatePersonaAvatar(record, target)
+            ? await replacePersonaAvatar(file, target)
             : await replaceCharacterAvatar(file, target);
         if (success) {
-            if (target.kind === 'character') {
-                getSettings().libraryActive[target.key] = record.id;
-                saveSettingsDebounced();
-            }
+            getSettings().libraryActive[target.key] = record.id;
+            saveSettingsDebounced();
             await renderAvatarGallery();
         }
     } finally {
@@ -1164,12 +1114,7 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
     if (!record || !target) {
         return;
     }
-    const deletingActivePersona = target.kind === 'persona'
-        && getSettings().libraryActive[target.key] === id;
-    const deleteEffect = deletingActivePersona
-        ? '删除后会恢复酒馆原头像。'
-        : '当前头像不会受影响。';
-    if (!window.confirm('确定从头像库删除“' + (record.name || '这张图片') + '”吗？' + deleteEffect)) {
+    if (!window.confirm('确定从头像库删除“' + (record.name || '这张图片') + '”吗？当前已经显示的头像不会被还原。')) {
         return;
     }
 
@@ -1180,13 +1125,9 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
             : null;
         galleryPendingSelectionId = nextRecord?.id || '';
         await deleteGalleryRecord(id);
-        const removedActiveRecord = getSettings().libraryActive[target.key] === id;
-        if (removedActiveRecord) {
+        if (getSettings().libraryActive[target.key] === id) {
             delete getSettings().libraryActive[target.key];
             saveSettingsDebounced();
-            if (target.kind === 'persona') {
-                deactivatePersonaLibrarySource(target.key);
-            }
         }
         await renderAvatarGallery();
     } catch (error) {
@@ -1690,10 +1631,6 @@ function moveLongPress(event) {
 }
 
 function bindLongPress() {
-    if (longPressBound) {
-        return;
-    }
-    longPressBound = true;
     document.addEventListener('pointerdown', beginLongPress, true);
     document.addEventListener('pointermove', moveLongPress, true);
     document.addEventListener('pointerup', clearPendingPress, true);
@@ -1846,21 +1783,6 @@ function bindAvatarGallery() {
     });
 }
 
-async function syncAvatarPresentation(image) {
-    try {
-        await applyPersonaLibrarySource(image);
-    } catch (error) {
-        console.warn('[Avatar Focus] Could not restore a persona library source:', error);
-    }
-    applySavedPosition(image);
-}
-
-async function applyAllPersonaLibrarySources() {
-    const images = Array.from(document.querySelectorAll(AVATAR_SELECTOR))
-        .filter((image) => isAvatarImage(image));
-    await Promise.all(images.map(applyPersonaLibrarySource));
-}
-
 function queueMutationImage(image) {
     if (isAvatarImage(image)) {
         mutationImages.add(image);
@@ -1870,7 +1792,7 @@ function queueMutationImage(image) {
     }
     mutationFrame = requestAnimationFrame(() => {
         mutationFrame = 0;
-        mutationImages.forEach((image) => void syncAvatarPresentation(image));
+        mutationImages.forEach(applySavedPosition);
         mutationImages.clear();
     });
 }
@@ -2000,14 +1922,9 @@ async function installAvatarGallery() {
 
 async function initialize() {
     getSettings();
-    // Long-press is the core feature. Bind it before any template, IndexedDB,
-    // gallery, or saved-style work so an optional feature can never block it.
-    bindLongPress();
     updateEditorViewportHeight();
     window.addEventListener('resize', updateEditorViewportHeight, { passive: true });
-    window.addEventListener('resize', scheduleAvatarLayoutRefresh, { passive: true });
     window.visualViewport?.addEventListener('resize', updateEditorViewportHeight, { passive: true });
-    window.visualViewport?.addEventListener('resize', scheduleAvatarLayoutRefresh, { passive: true });
     window.visualViewport?.addEventListener('scroll', updateEditorViewportHeight, { passive: true });
     try {
         await installEditor();
@@ -2016,18 +1933,10 @@ async function initialize() {
     } catch (error) {
         console.error('[Avatar Focus] UI initialization failed:', error);
     }
-    try {
-        applyAllSavedPositions();
-    } catch (error) {
-        console.warn('[Avatar Focus] Could not restore saved positions:', error);
-    }
+    applyAllSavedPositions();
+    bindLongPress();
     bindTripleClickReplacement();
     observeAvatars();
-    void applyAllPersonaLibrarySources()
-        .then(applyAllSavedPositions)
-        .catch((error) => {
-            console.warn('[Avatar Focus] Could not restore saved persona library images:', error);
-        });
     console.info('[Avatar Focus] Ready. Long-press to adjust; triple-click to open avatar library.');
 }
 

@@ -537,6 +537,19 @@ html.stafe-compact-viewport .stafe-gallery-dialog {
   max-height: calc(var(--stafe-viewport-height, 100dvh) - 16px);
 }
 
+.stafe-zoom-backdrop {
+  position: absolute !important;
+  z-index: -1 !important;
+  display: block !important;
+  box-sizing: border-box !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  background-repeat: no-repeat !important;
+  background-size: cover !important;
+}
+
 @media (max-width: 520px) {
   .stafe-gallery-content {
     padding-right: 0.65rem;
