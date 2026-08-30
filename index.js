@@ -44,6 +44,7 @@ const originalObjectPositions = new WeakMap();
 const replayedClicks = new WeakSet();
 let editorState = null;
 let pendingPress = null;
+let longPressBound = false;
 let suppressClickUntil = 0;
 let suppressClickKey = '';
 let clickSequence = null;
@@ -1689,6 +1690,10 @@ function moveLongPress(event) {
 }
 
 function bindLongPress() {
+    if (longPressBound) {
+        return;
+    }
+    longPressBound = true;
     document.addEventListener('pointerdown', beginLongPress, true);
     document.addEventListener('pointermove', moveLongPress, true);
     document.addEventListener('pointerup', clearPendingPress, true);
@@ -1995,6 +2000,9 @@ async function installAvatarGallery() {
 
 async function initialize() {
     getSettings();
+    // Long-press is the core feature. Bind it before any template, IndexedDB,
+    // gallery, or saved-style work so an optional feature can never block it.
+    bindLongPress();
     updateEditorViewportHeight();
     window.addEventListener('resize', updateEditorViewportHeight, { passive: true });
     window.addEventListener('resize', scheduleAvatarLayoutRefresh, { passive: true });
@@ -2008,8 +2016,11 @@ async function initialize() {
     } catch (error) {
         console.error('[Avatar Focus] UI initialization failed:', error);
     }
-    applyAllSavedPositions();
-    bindLongPress();
+    try {
+        applyAllSavedPositions();
+    } catch (error) {
+        console.warn('[Avatar Focus] Could not restore saved positions:', error);
+    }
     bindTripleClickReplacement();
     observeAvatars();
     void applyAllPersonaLibrarySources()
