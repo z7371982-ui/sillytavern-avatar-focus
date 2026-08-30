@@ -697,16 +697,71 @@ async function replaceCharacterAvatar(file, target = replacementTarget) {
     }
 }
 
+function getImageDimensions(file) {
+    return new Promise((resolve, reject) => {
+        const objectUrl = URL.createObjectURL(file);
+        const image = new Image();
+        const cleanup = () => URL.revokeObjectURL(objectUrl);
+
+        image.onload = () => {
+            const width = image.naturalWidth;
+            const height = image.naturalHeight;
+            cleanup();
+            if (!width || !height) {
+                reject(new Error('无法读取图片尺寸'));
+                return;
+            }
+            resolve({ width, height });
+        };
+        image.onerror = () => {
+            cleanup();
+            reject(new Error('无法读取图片内容'));
+        };
+        image.src = objectUrl;
+    });
+}
+
+async function getPersonaCrop(file) {
+    const { width, height } = await getImageDimensions(file);
+    let cropWidth;
+    let cropHeight;
+
+    // SillyTavern persona avatars are stored at 400 x 600. Its Tauri backend
+    // resizes to that size exactly, so a 2:3 crop must be supplied first to
+    // prevent square or landscape library images from being stretched.
+    if (width * 3 > height * 2) {
+        cropHeight = height - (height % 3);
+        cropWidth = cropHeight * 2 / 3;
+    } else {
+        cropWidth = width - (width % 2);
+        cropHeight = cropWidth * 3 / 2;
+    }
+
+    if (cropWidth < 2 || cropHeight < 3) {
+        throw new Error('图片尺寸太小');
+    }
+
+    return {
+        x: Math.floor((width - cropWidth) / 2),
+        y: Math.floor((height - cropHeight) / 2),
+        width: cropWidth,
+        height: cropHeight,
+        want_resize: true,
+    };
+}
+
 async function replacePersonaAvatar(file, target = replacementTarget) {
     if (!target || target.kind !== 'persona') {
         return false;
     }
 
     try {
+        const crop = await getPersonaCrop(file);
         const formData = new FormData();
         formData.append('avatar', file, file.name || 'avatar.png');
         formData.append('overwrite_name', target.avatarId);
-        const response = await fetch('/api/avatars/upload', {
+        const uploadUrl = '/api/avatars/upload?crop=' + encodeURIComponent(JSON.stringify(crop));
+        const response = await fetch(uploadUrl, {
             method: 'POST',
             headers: getRequestHeaders({ omitContentType: true }),
             cache: 'no-cache',
