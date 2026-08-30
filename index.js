@@ -53,11 +53,13 @@ let galleryDatabasePromise = null;
 let settingsPanelInstalling = false;
 let settingsPanelUnavailable = false;
 let mutationFrame = 0;
+let layoutFrame = 0;
 const mutationImages = new Set();
 const templateCache = new Map();
 const galleryEntries = new Map();
 const galleryRecordOrder = [];
 const galleryObjectUrls = [];
+const personaLibrarySources = new Map();
 let galleryCursor = 0;
 let galleryPendingSelectionId = '';
 
@@ -126,6 +128,19 @@ async function getGalleryRecords(ownerKey) {
             resolve(records);
         };
         request.onerror = () => reject(request.error || new Error('头像库读取失败。'));
+    });
+}
+
+async function getGalleryRecord(id) {
+    if (!id) {
+        return null;
+    }
+    const database = await openGalleryDatabase();
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction(LIBRARY_STORE_NAME, 'readonly');
+        const request = transaction.objectStore(LIBRARY_STORE_NAME).get(id);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error || new Error('头像图片读取失败。'));
     });
 }
 
@@ -238,24 +253,6 @@ function roundZoom(value) {
     return Math.round(clamp(value, MIN_ZOOM, MAX_ZOOM));
 }
 
-function getZoomClipPath(position) {
-    const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
-    if (zoom <= DEFAULT_ZOOM) {
-        return null;
-    }
-
-    const insetRange = 100 * (1 - DEFAULT_ZOOM / zoom);
-    const x = roundPosition(position.x) / 100;
-    const y = roundPosition(position.y) / 100;
-    const values = [
-        y * insetRange,
-        (1 - x) * insetRange,
-        (1 - y) * insetRange,
-        x * insetRange,
-    ].map((value) => Math.round(value * 1000) / 1000);
-    return `inset(${values[0]}% ${values[1]}% ${values[2]}% ${values[3]}%)`;
-}
-
 function safeDecode(value) {
     try {
         return decodeURIComponent(value);
@@ -277,6 +274,10 @@ function getImageKey(image) {
     const source = image.getAttribute('src') || image.currentSrc || image.src || '';
     if (!source) {
         return '';
+    }
+    if (image.dataset.stafeLibraryKey
+        && image.dataset.stafeLibrarySource === source) {
+        return image.dataset.stafeLibraryKey;
     }
     if (source.startsWith('data:') || source.startsWith('blob:')) {
         return 'embedded:' + smallHash(source);
@@ -461,6 +462,16 @@ function rememberOriginalPosition(image) {
             originPriority: image.style.getPropertyPriority('transform-origin'),
             clipValue: image.style.getPropertyValue('clip-path'),
             clipPriority: image.style.getPropertyPriority('clip-path'),
+            fitValue: image.style.getPropertyValue('object-fit'),
+            fitPriority: image.style.getPropertyPriority('object-fit'),
+            backgroundImageValue: image.style.getPropertyValue('background-image'),
+            backgroundImagePriority: image.style.getPropertyPriority('background-image'),
+            backgroundSizeValue: image.style.getPropertyValue('background-size'),
+            backgroundSizePriority: image.style.getPropertyPriority('background-size'),
+            backgroundPositionValue: image.style.getPropertyValue('background-position'),
+            backgroundPositionPriority: image.style.getPropertyPriority('background-position'),
+            backgroundRepeatValue: image.style.getPropertyValue('background-repeat'),
+            backgroundRepeatPriority: image.style.getPropertyPriority('background-repeat'),
         });
     }
 }
@@ -480,34 +491,80 @@ function restoreImagePosition(image) {
     restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
     restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
     restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+    restoreOriginalProperty(image, 'object-fit', original.fitValue, original.fitPriority);
+    restoreOriginalProperty(image, 'background-image', original.backgroundImageValue, original.backgroundImagePriority);
+    restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
+    restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
+    restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
+}
+
+function restoreZoomRendering(image, original) {
+    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+    restoreOriginalProperty(image, 'object-fit', original.fitValue, original.fitPriority);
+    restoreOriginalProperty(image, 'background-image', original.backgroundImageValue, original.backgroundImagePriority);
+    restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
+    restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
+    restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
+}
+
+function cssUrl(source) {
+    const escaped = String(source)
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/[\n\r\f]/g, '');
+    return `url("${escaped}")`;
+}
+
+function setZoomBackground(image, position, zoom, original) {
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    const boxWidth = image.clientWidth || image.getBoundingClientRect().width;
+    const boxHeight = image.clientHeight || image.getBoundingClientRect().height;
+    const source = image.currentSrc || image.getAttribute('src') || image.src || '';
+    if (!image.complete || !width || !height || !boxWidth || !boxHeight || !source) {
+        image.addEventListener('load', () => applySavedPosition(image), { once: true });
+        restoreZoomRendering(image, original);
+        return;
+    }
+
+    const coverScale = Math.max(boxWidth / width, boxHeight / height);
+    const containScale = Math.min(boxWidth / width, boxHeight / height);
+    const zoomScale = zoom < DEFAULT_ZOOM
+        ? containScale + (coverScale - containScale)
+            * ((zoom - MIN_ZOOM) / (DEFAULT_ZOOM - MIN_ZOOM))
+        : coverScale * (zoom / DEFAULT_ZOOM);
+    const renderedWidth = Math.round(width * zoomScale * 1000) / 1000;
+    const renderedHeight = Math.round(height * zoomScale * 1000) / 1000;
+    const x = roundPosition(position.x);
+    const y = roundPosition(position.y);
+    const sourceLayer = cssUrl(source);
+
+    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+    image.style.setProperty('object-fit', 'none', 'important');
+    image.style.setProperty('object-position', '-100000px -100000px', 'important');
+    image.style.setProperty('background-image', `${sourceLayer}, ${sourceLayer}`, 'important');
+    image.style.setProperty('background-size', `${renderedWidth}px ${renderedHeight}px, cover`, 'important');
+    image.style.setProperty('background-position', `${x}% ${y}%, ${x}% ${y}%`, 'important');
+    image.style.setProperty('background-repeat', 'no-repeat', 'important');
 }
 
 function setImagePosition(image, position) {
     rememberOriginalPosition(image);
     const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
-    image.style.setProperty(
-        'object-position',
-        roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
-        'important',
-    );
     const original = originalObjectPositions.get(image);
     if (zoom === DEFAULT_ZOOM) {
-        restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
-        restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
-        restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
-    } else {
-        image.style.setProperty('scale', String(zoom / 100), 'important');
+        restoreZoomRendering(image, original);
         image.style.setProperty(
-            'transform-origin',
+            'object-position',
             roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
             'important',
         );
-        const clipPath = getZoomClipPath(position);
-        if (clipPath) {
-            image.style.setProperty('clip-path', clipPath, 'important');
-        } else {
-            restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
-        }
+    } else {
+        setZoomBackground(image, position, zoom, original);
     }
 }
 
@@ -537,6 +594,16 @@ function forEachAvatar(callback) {
 
 function applyAllSavedPositions() {
     forEachAvatar(applySavedPosition);
+}
+
+function scheduleAvatarLayoutRefresh() {
+    if (layoutFrame) {
+        return;
+    }
+    layoutFrame = requestAnimationFrame(() => {
+        layoutFrame = 0;
+        applyAllSavedPositions();
+    });
 }
 
 function restoreAllPositions() {
@@ -697,87 +764,161 @@ async function replaceCharacterAvatar(file, target = replacementTarget) {
     }
 }
 
-function getImageDimensions(file) {
-    return new Promise((resolve, reject) => {
-        const objectUrl = URL.createObjectURL(file);
-        const image = new Image();
-        const cleanup = () => URL.revokeObjectURL(objectUrl);
-
-        image.onload = () => {
-            const width = image.naturalWidth;
-            const height = image.naturalHeight;
-            cleanup();
-            if (!width || !height) {
-                reject(new Error('无法读取图片尺寸'));
-                return;
-            }
-            resolve({ width, height });
-        };
-        image.onerror = () => {
-            cleanup();
-            reject(new Error('无法读取图片内容'));
-        };
-        image.src = objectUrl;
-    });
+function clearPersonaLibraryMetadata(image) {
+    delete image.dataset.stafeLibraryKey;
+    delete image.dataset.stafeLibrarySource;
+    delete image.dataset.stafeLibraryCoreSource;
+    delete image.dataset.stafeLibraryCoreSrcset;
+    delete image.dataset.stafeLibraryHadSrcset;
 }
 
-async function getPersonaCrop(file) {
-    const { width, height } = await getImageDimensions(file);
-    let cropWidth;
-    let cropHeight;
+function restorePersonaLibrarySource(image) {
+    const librarySource = image.dataset.stafeLibrarySource || '';
+    const coreSource = image.dataset.stafeLibraryCoreSource || '';
+    const coreSrcset = image.dataset.stafeLibraryCoreSrcset || '';
+    const hadSrcset = image.dataset.stafeLibraryHadSrcset === 'true';
+    const currentSource = image.getAttribute('src') || '';
+    clearPersonaLibraryMetadata(image);
 
-    // SillyTavern persona avatars are stored at 400 x 600. Its Tauri backend
-    // resizes to that size exactly, so a 2:3 crop must be supplied first to
-    // prevent square or landscape library images from being stretched.
-    if (width * 3 > height * 2) {
-        cropHeight = height - (height % 3);
-        cropWidth = cropHeight * 2 / 3;
-    } else {
-        cropWidth = width - (width % 2);
-        cropHeight = cropWidth * 3 / 2;
+    if (currentSource === librarySource && coreSource) {
+        image.src = coreSource;
+    }
+    if (hadSrcset) {
+        image.setAttribute('srcset', coreSrcset);
+    }
+}
+
+function reconcilePersonaLibrarySource(image) {
+    const librarySource = image.dataset.stafeLibrarySource || '';
+    const currentSource = image.getAttribute('src') || '';
+    if (librarySource && currentSource !== librarySource) {
+        clearPersonaLibraryMetadata(image);
+    }
+}
+
+async function preparePersonaLibrarySource(key, preferredRecord = null) {
+    const activeId = getSettings().libraryActive[key] || '';
+    if (!key.startsWith('persona:') || !activeId) {
+        return null;
     }
 
-    if (cropWidth < 2 || cropHeight < 3) {
-        throw new Error('图片尺寸太小');
+    const cached = personaLibrarySources.get(key);
+    if (cached?.recordId === activeId) {
+        return cached;
     }
 
-    return {
-        x: Math.floor((width - cropWidth) / 2),
-        y: Math.floor((height - cropHeight) / 2),
-        width: cropWidth,
-        height: cropHeight,
-        want_resize: true,
+    const record = preferredRecord?.id === activeId
+        ? preferredRecord
+        : await getGalleryRecord(activeId);
+    if (!record || record.ownerKey !== key || !(record.blob instanceof Blob)) {
+        return null;
+    }
+
+    const entry = {
+        recordId: record.id,
+        url: URL.createObjectURL(record.blob),
     };
+    personaLibrarySources.set(key, entry);
+    if (cached?.url) {
+        window.setTimeout(() => URL.revokeObjectURL(cached.url), 1000);
+    }
+    return entry;
 }
 
-async function replacePersonaAvatar(file, target = replacementTarget) {
-    if (!target || target.kind !== 'persona') {
+async function applyPersonaLibrarySource(image, preparedSource = null) {
+    if (!(image instanceof HTMLImageElement)) {
+        return;
+    }
+
+    reconcilePersonaLibrarySource(image);
+    const key = getImageKey(image);
+    if (!key.startsWith('persona:')) {
+        return;
+    }
+
+    const activeId = getSettings().libraryActive[key] || '';
+    if (!activeId) {
+        if (image.dataset.stafeLibraryKey) {
+            restorePersonaLibrarySource(image);
+        }
+        return;
+    }
+
+    const source = preparedSource?.recordId === activeId
+        ? preparedSource
+        : await preparePersonaLibrarySource(key);
+    if (!source || !image.isConnected) {
+        return;
+    }
+
+    const currentSource = image.getAttribute('src') || image.currentSrc || image.src || '';
+    if (currentSource === source.url && image.dataset.stafeLibraryKey === key) {
+        return;
+    }
+
+    const existingCoreSource = image.dataset.stafeLibraryCoreSource || '';
+    const existingCoreSrcset = image.dataset.stafeLibraryCoreSrcset || '';
+    const existingHadSrcset = image.dataset.stafeLibraryHadSrcset === 'true';
+    image.dataset.stafeLibraryKey = key;
+    image.dataset.stafeLibrarySource = source.url;
+    image.dataset.stafeLibraryCoreSource = existingCoreSource || currentSource;
+    image.dataset.stafeLibraryCoreSrcset = existingCoreSource
+        ? existingCoreSrcset
+        : (image.getAttribute('srcset') || '');
+    image.dataset.stafeLibraryHadSrcset = String(existingCoreSource
+        ? existingHadSrcset
+        : image.hasAttribute('srcset'));
+    image.removeAttribute('srcset');
+    image.src = source.url;
+}
+
+async function applyPersonaLibrarySourceForKey(key, record = null) {
+    const source = await preparePersonaLibrarySource(key, record);
+    if (!source) {
+        throw new Error('无法从头像库读取这张原图');
+    }
+    const images = Array.from(document.querySelectorAll(AVATAR_SELECTOR))
+        .filter((image) => image instanceof HTMLImageElement)
+        .filter((image) => {
+            reconcilePersonaLibrarySource(image);
+            return getImageKey(image) === key;
+        });
+    await Promise.all(images.map((image) => applyPersonaLibrarySource(image, source)));
+}
+
+function deactivatePersonaLibrarySource(key) {
+    const cached = personaLibrarySources.get(key);
+    personaLibrarySources.delete(key);
+    forEachAvatar((image) => {
+        if (image.dataset.stafeLibraryKey === key) {
+            restorePersonaLibrarySource(image);
+        }
+    });
+    if (cached?.url) {
+        window.setTimeout(() => URL.revokeObjectURL(cached.url), 1000);
+    }
+}
+
+async function activatePersonaAvatar(record, target = replacementTarget) {
+    if (!target || target.kind !== 'persona' || !record) {
         return false;
     }
 
+    const previousId = getSettings().libraryActive[target.key] || '';
+    getSettings().libraryActive[target.key] = record.id;
     try {
-        const crop = await getPersonaCrop(file);
-        const formData = new FormData();
-        formData.append('avatar', file, file.name || 'avatar.png');
-        formData.append('overwrite_name', target.avatarId);
-        const uploadUrl = '/api/avatars/upload?crop=' + encodeURIComponent(JSON.stringify(crop));
-        const response = await fetch(uploadUrl, {
-            method: 'POST',
-            headers: getRequestHeaders({ omitContentType: true }),
-            cache: 'no-cache',
-            body: formData,
-        });
-        if (!response.ok) {
-            const details = await response.text();
-            throw new Error(details || 'HTTP ' + response.status);
-        }
-
-        bustVisibleAvatarCache(target.key);
-        notify('success', '“' + target.label + '”的头像已切换。');
+        await applyPersonaLibrarySourceForKey(target.key, record);
+        saveSettingsDebounced();
+        notify('success', '“' + target.label + '”已切换为头像库原图。');
         return true;
     } catch (error) {
-        console.error('[Avatar Focus] Persona avatar replacement failed:', error);
-        notify('error', '用户头像替换失败：' + (error instanceof Error ? error.message : String(error)));
+        if (previousId) {
+            getSettings().libraryActive[target.key] = previousId;
+        } else {
+            delete getSettings().libraryActive[target.key];
+        }
+        console.error('[Avatar Focus] Persona library activation failed:', error);
+        notify('error', '用户头像切换失败：' + (error instanceof Error ? error.message : String(error)));
         return false;
     }
 }
@@ -909,6 +1050,9 @@ async function saveCurrentAvatarIfLibraryEmpty() {
         if (record) {
             getSettings().libraryActive[replacementTarget.key] = record.id;
             saveSettingsDebounced();
+            if (replacementTarget.kind === 'persona') {
+                await applyPersonaLibrarySourceForKey(replacementTarget.key, record);
+            }
         }
     } catch (error) {
         console.warn('[Avatar Focus] Could not preserve the current avatar in the library:', error);
@@ -996,11 +1140,13 @@ async function selectGalleryRecord(id = getCurrentGalleryRecord()?.id) {
     try {
         const file = new File([record.blob], record.name || 'avatar.png', { type: record.type || record.blob.type || 'image/png' });
         const success = target.kind === 'persona'
-            ? await replacePersonaAvatar(file, target)
+            ? await activatePersonaAvatar(record, target)
             : await replaceCharacterAvatar(file, target);
         if (success) {
-            getSettings().libraryActive[target.key] = record.id;
-            saveSettingsDebounced();
+            if (target.kind === 'character') {
+                getSettings().libraryActive[target.key] = record.id;
+                saveSettingsDebounced();
+            }
             await renderAvatarGallery();
         }
     } finally {
@@ -1014,7 +1160,12 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
     if (!record || !target) {
         return;
     }
-    if (!window.confirm('确定从头像库删除“' + (record.name || '这张图片') + '”吗？当前已经显示的头像不会被还原。')) {
+    const deletingActivePersona = target.kind === 'persona'
+        && getSettings().libraryActive[target.key] === id;
+    const deleteEffect = deletingActivePersona
+        ? '删除后会恢复酒馆原头像。'
+        : '当前头像不会受影响。';
+    if (!window.confirm('确定从头像库删除“' + (record.name || '这张图片') + '”吗？' + deleteEffect)) {
         return;
     }
 
@@ -1025,9 +1176,13 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
             : null;
         galleryPendingSelectionId = nextRecord?.id || '';
         await deleteGalleryRecord(id);
-        if (getSettings().libraryActive[target.key] === id) {
+        const removedActiveRecord = getSettings().libraryActive[target.key] === id;
+        if (removedActiveRecord) {
             delete getSettings().libraryActive[target.key];
             saveSettingsDebounced();
+            if (target.kind === 'persona') {
+                deactivatePersonaLibrarySource(target.key);
+            }
         }
         await renderAvatarGallery();
     } catch (error) {
@@ -1683,6 +1838,21 @@ function bindAvatarGallery() {
     });
 }
 
+async function syncAvatarPresentation(image) {
+    try {
+        await applyPersonaLibrarySource(image);
+    } catch (error) {
+        console.warn('[Avatar Focus] Could not restore a persona library source:', error);
+    }
+    applySavedPosition(image);
+}
+
+async function applyAllPersonaLibrarySources() {
+    const images = Array.from(document.querySelectorAll(AVATAR_SELECTOR))
+        .filter((image) => isAvatarImage(image));
+    await Promise.all(images.map(applyPersonaLibrarySource));
+}
+
 function queueMutationImage(image) {
     if (isAvatarImage(image)) {
         mutationImages.add(image);
@@ -1692,7 +1862,7 @@ function queueMutationImage(image) {
     }
     mutationFrame = requestAnimationFrame(() => {
         mutationFrame = 0;
-        mutationImages.forEach(applySavedPosition);
+        mutationImages.forEach((image) => void syncAvatarPresentation(image));
         mutationImages.clear();
     });
 }
@@ -1824,7 +1994,9 @@ async function initialize() {
     getSettings();
     updateEditorViewportHeight();
     window.addEventListener('resize', updateEditorViewportHeight, { passive: true });
+    window.addEventListener('resize', scheduleAvatarLayoutRefresh, { passive: true });
     window.visualViewport?.addEventListener('resize', updateEditorViewportHeight, { passive: true });
+    window.visualViewport?.addEventListener('resize', scheduleAvatarLayoutRefresh, { passive: true });
     window.visualViewport?.addEventListener('scroll', updateEditorViewportHeight, { passive: true });
     try {
         await installEditor();
@@ -1832,6 +2004,11 @@ async function initialize() {
         await installSettingsPanel();
     } catch (error) {
         console.error('[Avatar Focus] UI initialization failed:', error);
+    }
+    try {
+        await applyAllPersonaLibrarySources();
+    } catch (error) {
+        console.warn('[Avatar Focus] Could not restore saved persona library images:', error);
     }
     applyAllSavedPositions();
     bindLongPress();
