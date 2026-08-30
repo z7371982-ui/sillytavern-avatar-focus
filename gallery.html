@@ -1,0 +1,59 @@
+<div id="stafe_gallery" class="stafe-editor stafe-gallery" hidden aria-hidden="true">
+  <div class="stafe-backdrop" data-stafe-gallery-action="close"></div>
+  <section class="stafe-dialog stafe-gallery-dialog" role="dialog" aria-modal="true" aria-labelledby="stafe_gallery_title">
+    <header class="stafe-dialog-header">
+      <div>
+        <h2 id="stafe_gallery_title">头像库</h2>
+        <p id="stafe_gallery_avatar_name">当前头像</p>
+      </div>
+      <button class="stafe-icon-button" data-stafe-gallery-action="close" type="button" aria-label="关闭">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </header>
+
+    <div class="stafe-gallery-content">
+      <div class="stafe-gallery-toolbar">
+        <button class="menu_button menu_button_icon" data-stafe-gallery-action="import" type="button">
+          <i class="fa-solid fa-images"></i>
+          <span>批量导入图片</span>
+        </button>
+        <button class="menu_button menu_button_icon" data-stafe-gallery-action="delete" type="button">
+          <i class="fa-solid fa-trash"></i>
+          <span>删除当前图片</span>
+        </button>
+      </div>
+      <p class="stafe-gallery-note">用左右箭头翻看，找到后点“使用这张”。图片保存在这个浏览器里。</p>
+      <div id="stafe_gallery_carousel" class="stafe-gallery-carousel" aria-live="polite">
+        <button class="stafe-gallery-arrow" data-stafe-gallery-action="previous" type="button" aria-label="上一张">
+          <i class="fa-solid fa-chevron-left"></i>
+        </button>
+        <figure class="stafe-gallery-figure">
+          <img id="stafe_gallery_preview" alt="">
+          <figcaption>
+            <span id="stafe_gallery_name">头像图片</span>
+            <span id="stafe_gallery_count" class="stafe-gallery-count">0 / 0</span>
+          </figcaption>
+          <span id="stafe_gallery_active" class="stafe-gallery-current-mark" hidden>
+            <i class="fa-solid fa-check"></i> 当前使用
+          </span>
+        </figure>
+        <button class="stafe-gallery-arrow" data-stafe-gallery-action="next" type="button" aria-label="下一张">
+          <i class="fa-solid fa-chevron-right"></i>
+        </button>
+      </div>
+      <div id="stafe_gallery_empty" class="stafe-gallery-empty" hidden>
+        <i class="fa-regular fa-images"></i>
+        <span>头像库还是空的，可以一次选择多张图片导入。</span>
+      </div>
+    </div>
+
+    <footer class="stafe-dialog-actions">
+      <span class="stafe-action-spacer"></span>
+      <button class="menu_button menu_button_icon stafe-save" data-stafe-gallery-action="select" type="button">
+        <i class="fa-solid fa-check"></i>
+        <span>使用这张</span>
+      </button>
+      <button class="menu_button" data-stafe-gallery-action="close" type="button">完成</button>
+    </footer>
+  </section>
+</div>

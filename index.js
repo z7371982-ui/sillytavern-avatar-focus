@@ -30,11 +30,15 @@ const DEFAULTS = Object.freeze({
     tripleClickEnabled: true,
     longPressMs: 450,
     positions: {},
+    libraryActive: {},
 });
 const TRIPLE_CLICK_WINDOW_MS = 420;
 const MIN_ZOOM = 50;
 const MAX_ZOOM = 300;
 const DEFAULT_ZOOM = 100;
+const LIBRARY_DB_NAME = 'sillytavern-avatar-focus-library';
+const LIBRARY_STORE_NAME = 'images';
+const LIBRARY_DB_VERSION = 1;
 
 const originalObjectPositions = new WeakMap();
 const replayedClicks = new WeakSet();
@@ -44,11 +48,25 @@ let suppressClickUntil = 0;
 let suppressClickKey = '';
 let clickSequence = null;
 let replacementTarget = null;
+let galleryBusy = false;
+let galleryDatabasePromise = null;
 let settingsPanelInstalling = false;
 let settingsPanelUnavailable = false;
 let mutationFrame = 0;
 const mutationImages = new Set();
 const templateCache = new Map();
+const galleryEntries = new Map();
+const galleryRecordOrder = [];
+const galleryObjectUrls = [];
+let galleryCursor = 0;
+let galleryPendingSelectionId = '';
+
+function isImageFile(file) {
+    return file instanceof Blob
+        && file.size > 0
+        && (String(file.type).startsWith('image/')
+            || /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(String(file.name || '')));
+}
 
 async function loadOwnTemplate(name) {
     if (templateCache.has(name)) {
@@ -70,6 +88,94 @@ async function loadOwnTemplate(name) {
     return html;
 }
 
+function openGalleryDatabase() {
+    if (galleryDatabasePromise) {
+        return galleryDatabasePromise;
+    }
+    if (!globalThis.indexedDB) {
+        return Promise.reject(new Error('当前浏览器不支持本地头像库。'));
+    }
+
+    galleryDatabasePromise = new Promise((resolve, reject) => {
+        const request = indexedDB.open(LIBRARY_DB_NAME, LIBRARY_DB_VERSION);
+        request.onupgradeneeded = () => {
+            const database = request.result;
+            if (!database.objectStoreNames.contains(LIBRARY_STORE_NAME)) {
+                const store = database.createObjectStore(LIBRARY_STORE_NAME, { keyPath: 'id' });
+                store.createIndex('ownerKey', 'ownerKey', { unique: false });
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error('头像库数据库打开失败。'));
+        request.onblocked = () => reject(new Error('头像库正在被另一个页面占用，请关闭其它酒馆页面后重试。'));
+    }).catch((error) => {
+        galleryDatabasePromise = null;
+        throw error;
+    });
+    return galleryDatabasePromise;
+}
+
+async function getGalleryRecords(ownerKey) {
+    const database = await openGalleryDatabase();
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction(LIBRARY_STORE_NAME, 'readonly');
+        const request = transaction.objectStore(LIBRARY_STORE_NAME).index('ownerKey').getAll(ownerKey);
+        request.onsuccess = () => {
+            const records = Array.isArray(request.result) ? request.result : [];
+            records.sort((left, right) => Number(left.createdAt) - Number(right.createdAt));
+            resolve(records);
+        };
+        request.onerror = () => reject(request.error || new Error('头像库读取失败。'));
+    });
+}
+
+function createGalleryRecord(ownerKey, file, options = {}) {
+    const fallbackId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    return {
+        id: globalThis.crypto?.randomUUID?.() || fallbackId,
+        ownerKey,
+        name: options.name || file.name || '头像图片',
+        type: file.type || 'image/png',
+        size: Number(file.size) || 0,
+        createdAt: Date.now() + Math.random(),
+        original: Boolean(options.original),
+        blob: file,
+    };
+}
+
+async function addGalleryRecords(ownerKey, files, options = {}) {
+    const validFiles = Array.from(files).filter(isImageFile);
+    if (!validFiles.length) {
+        return [];
+    }
+
+    const records = validFiles.map((file, index) => createGalleryRecord(ownerKey, file, {
+        name: options.name && index === 0 ? options.name : file.name,
+        original: options.original && index === 0,
+    }));
+    const database = await openGalleryDatabase();
+    await new Promise((resolve, reject) => {
+        const transaction = database.transaction(LIBRARY_STORE_NAME, 'readwrite');
+        const store = transaction.objectStore(LIBRARY_STORE_NAME);
+        records.forEach((record) => store.put(record));
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error || new Error('头像图片保存失败。'));
+        transaction.onabort = () => reject(transaction.error || new Error('头像图片保存被浏览器中止。'));
+    });
+    return records;
+}
+
+async function deleteGalleryRecord(id) {
+    const database = await openGalleryDatabase();
+    await new Promise((resolve, reject) => {
+        const transaction = database.transaction(LIBRARY_STORE_NAME, 'readwrite');
+        transaction.objectStore(LIBRARY_STORE_NAME).delete(id);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error || new Error('头像图片删除失败。'));
+        transaction.onabort = () => reject(transaction.error || new Error('头像图片删除被浏览器中止。'));
+    });
+}
+
 function getSettings() {
     if (!extension_settings[MODULE_NAME] || typeof extension_settings[MODULE_NAME] !== 'object') {
         extension_settings[MODULE_NAME] = {};
@@ -88,13 +194,16 @@ function getSettings() {
     if (!current.positions || typeof current.positions !== 'object' || Array.isArray(current.positions)) {
         current.positions = {};
     }
+    if (!current.libraryActive || typeof current.libraryActive !== 'object' || Array.isArray(current.libraryActive)) {
+        current.libraryActive = {};
+    }
     return current;
 }
 
 function notify(level, message) {
     const toast = globalThis.toastr?.[level];
     if (typeof toast === 'function') {
-        toast(message, '头像取景调整');
+        toast(message, '头像取景与头像库');
     } else {
         console.info('[Avatar Focus] ' + message);
     }
@@ -497,6 +606,7 @@ function getReplacementDescriptor(image) {
             key,
             avatarId: key.slice('avatar:'.length),
             label: getAvatarLabel(image),
+            imageSource: image.currentSrc || image.src,
         };
     }
     if (key.startsWith('persona:')) {
@@ -505,6 +615,7 @@ function getReplacementDescriptor(image) {
             key,
             avatarId: key.slice('persona:'.length),
             label: getAvatarLabel(image),
+            imageSource: image.currentSrc || image.src,
         };
     }
     return null;
@@ -531,38 +642,16 @@ function bustVisibleAvatarCache(key) {
 function chooseAvatarReplacement(image) {
     const descriptor = getReplacementDescriptor(image);
     if (!descriptor) {
-        notify('warning', '这个头像不是角色或用户头像，无法直接替换。');
-        return;
-    }
-
-    if (descriptor.kind === 'persona') {
-        const input = document.getElementById('avatar_upload_file');
-        const overwrite = document.getElementById('avatar_upload_overwrite');
-        if (!(input instanceof HTMLInputElement) || !(overwrite instanceof HTMLInputElement)) {
-            notify('warning', '请先打开一次“用户设置 → 角色扮演”，让酒馆加载用户头像管理器。');
-            return;
-        }
-        input.value = '';
-        overwrite.value = descriptor.avatarId;
-        input.click();
-        return;
-    }
-
-    const input = document.getElementById('stafe_replace_input');
-    if (!(input instanceof HTMLInputElement)) {
-        notify('error', '头像文件选择器没有加载成功，请刷新酒馆后再试。');
+        notify('warning', '这个头像不是角色或用户头像，无法使用头像库。');
         return;
     }
     replacementTarget = descriptor;
-    input.value = '';
-    input.click();
+    void openAvatarGallery();
 }
 
-async function replaceCharacterAvatar(file) {
-    const target = replacementTarget;
-    replacementTarget = null;
+async function replaceCharacterAvatar(file, target = replacementTarget) {
     if (!target || target.kind !== 'character') {
-        return;
+        return false;
     }
 
     const input = document.getElementById('stafe_replace_input');
@@ -595,14 +684,302 @@ async function replaceCharacterAvatar(file) {
             }
         }
         notify('success', '“' + target.label + '”的头像已替换；需要时可再长按微调取景。');
+        return true;
     } catch (error) {
         console.error('[Avatar Focus] Character avatar replacement failed:', error);
         notify('error', '头像替换失败：' + (error instanceof Error ? error.message : String(error)));
+        return false;
     } finally {
         if (input instanceof HTMLInputElement) {
             input.disabled = false;
             input.value = '';
         }
+    }
+}
+
+async function replacePersonaAvatar(file, target = replacementTarget) {
+    if (!target || target.kind !== 'persona') {
+        return false;
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('avatar', file, file.name || 'avatar.png');
+        formData.append('overwrite_name', target.avatarId);
+        const response = await fetch('/api/avatars/upload', {
+            method: 'POST',
+            headers: getRequestHeaders({ omitContentType: true }),
+            cache: 'no-cache',
+            body: formData,
+        });
+        if (!response.ok) {
+            const details = await response.text();
+            throw new Error(details || 'HTTP ' + response.status);
+        }
+
+        bustVisibleAvatarCache(target.key);
+        notify('success', '“' + target.label + '”的头像已切换。');
+        return true;
+    } catch (error) {
+        console.error('[Avatar Focus] Persona avatar replacement failed:', error);
+        notify('error', '用户头像替换失败：' + (error instanceof Error ? error.message : String(error)));
+        return false;
+    }
+}
+
+function revokeGalleryObjectUrls() {
+    galleryObjectUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+}
+
+function setGalleryBusy(busy) {
+    galleryBusy = busy;
+    const gallery = document.getElementById('stafe_gallery');
+    gallery?.classList.toggle('stafe-gallery-busy', busy);
+    updateGalleryControlStates();
+}
+
+function getCurrentGalleryRecord() {
+    return galleryRecordOrder[galleryCursor] || null;
+}
+
+function updateGalleryControlStates() {
+    const gallery = document.getElementById('stafe_gallery');
+    if (!gallery) {
+        return;
+    }
+    const hasRecords = galleryRecordOrder.length > 0;
+    const hasSeveral = galleryRecordOrder.length > 1;
+    gallery.querySelectorAll('button').forEach((button) => {
+        const action = button.dataset.stafeGalleryAction;
+        if (galleryBusy) {
+            button.disabled = true;
+        } else if (action === 'previous' || action === 'next') {
+            button.disabled = !hasSeveral;
+        } else if (action === 'select' || action === 'delete') {
+            button.disabled = !hasRecords;
+        } else {
+            button.disabled = false;
+        }
+    });
+}
+
+function renderGalleryCarousel() {
+    const carousel = document.getElementById('stafe_gallery_carousel');
+    const preview = document.getElementById('stafe_gallery_preview');
+    const name = document.getElementById('stafe_gallery_name');
+    const count = document.getElementById('stafe_gallery_count');
+    const active = document.getElementById('stafe_gallery_active');
+    const empty = document.getElementById('stafe_gallery_empty');
+    if (!carousel || !(preview instanceof HTMLImageElement) || !name || !count || !active || !empty) {
+        return;
+    }
+
+    revokeGalleryObjectUrls();
+    const record = getCurrentGalleryRecord();
+    carousel.hidden = !record;
+    empty.hidden = Boolean(record);
+    if (!record) {
+        preview.removeAttribute('src');
+        preview.alt = '';
+        name.textContent = '头像图片';
+        count.textContent = '0 / 0';
+        active.hidden = true;
+        updateGalleryControlStates();
+        return;
+    }
+
+    const objectUrl = URL.createObjectURL(record.blob);
+    galleryObjectUrls.push(objectUrl);
+    preview.src = objectUrl;
+    preview.alt = record.name || '头像图片';
+    name.textContent = record.name || '头像图片';
+    count.textContent = (galleryCursor + 1) + ' / ' + galleryRecordOrder.length;
+    active.hidden = getSettings().libraryActive[replacementTarget?.key] !== record.id;
+    updateGalleryControlStates();
+}
+
+async function renderAvatarGallery() {
+    if (!replacementTarget) {
+        return;
+    }
+    const previousRecord = getCurrentGalleryRecord();
+    galleryEntries.clear();
+    galleryRecordOrder.splice(0);
+    const records = await getGalleryRecords(replacementTarget.key);
+    records.forEach((record) => {
+        galleryEntries.set(record.id, record);
+        galleryRecordOrder.push(record);
+    });
+    const activeId = getSettings().libraryActive[replacementTarget.key] || '';
+    const preferredId = galleryPendingSelectionId || previousRecord?.id || activeId;
+    galleryPendingSelectionId = '';
+    const preferredIndex = records.findIndex((record) => record.id === preferredId);
+    galleryCursor = records.length ? (preferredIndex >= 0 ? preferredIndex : 0) : 0;
+    renderGalleryCarousel();
+}
+
+function moveGalleryCursor(direction) {
+    if (galleryBusy || galleryRecordOrder.length < 2) {
+        return;
+    }
+    galleryCursor = (galleryCursor + direction + galleryRecordOrder.length) % galleryRecordOrder.length;
+    renderGalleryCarousel();
+}
+
+async function saveCurrentAvatarIfLibraryEmpty() {
+    if (!replacementTarget?.imageSource) {
+        return;
+    }
+    const records = await getGalleryRecords(replacementTarget.key);
+    if (records.length) {
+        return;
+    }
+
+    try {
+        const response = await fetch(replacementTarget.imageSource, { cache: 'no-store' });
+        if (!response.ok) {
+            return;
+        }
+        const blob = await response.blob();
+        const sourceLooksLikeImage = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|webp)(?:[?#]|$)/i.test(replacementTarget.imageSource);
+        if (!blob.size || (!String(blob.type).startsWith('image/') && !sourceLooksLikeImage)) {
+            return;
+        }
+        const extension = String(blob.type).split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+        const file = new File([blob], '原头像.' + extension, { type: blob.type || 'image/png' });
+        const [record] = await addGalleryRecords(replacementTarget.key, [file], {
+            name: '原头像',
+            original: true,
+        });
+        if (record) {
+            getSettings().libraryActive[replacementTarget.key] = record.id;
+            saveSettingsDebounced();
+        }
+    } catch (error) {
+        console.warn('[Avatar Focus] Could not preserve the current avatar in the library:', error);
+    }
+}
+
+async function openAvatarGallery() {
+    const gallery = document.getElementById('stafe_gallery');
+    if (!replacementTarget || !gallery) {
+        notify('error', '头像库没有加载成功，请刷新酒馆后再试。');
+        return;
+    }
+
+    document.getElementById('stafe_gallery_avatar_name').textContent = replacementTarget.label;
+    gallery.hidden = false;
+    gallery.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('stafe-modal-open');
+    updateEditorViewportHeight();
+    setGalleryBusy(true);
+    try {
+        await saveCurrentAvatarIfLibraryEmpty();
+        await renderAvatarGallery();
+    } catch (error) {
+        console.error('[Avatar Focus] Avatar library failed to open:', error);
+        notify('error', '头像库打开失败：' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+        setGalleryBusy(false);
+    }
+}
+
+function closeAvatarGallery() {
+    if (galleryBusy) {
+        return;
+    }
+    const gallery = document.getElementById('stafe_gallery');
+    if (gallery) {
+        gallery.hidden = true;
+        gallery.setAttribute('aria-hidden', 'true');
+    }
+    document.body.classList.remove('stafe-modal-open');
+    revokeGalleryObjectUrls();
+    galleryEntries.clear();
+    galleryRecordOrder.splice(0);
+    galleryCursor = 0;
+    galleryPendingSelectionId = '';
+    replacementTarget = null;
+    const input = document.getElementById('stafe_replace_input');
+    if (input instanceof HTMLInputElement) {
+        input.value = '';
+    }
+}
+
+async function importGalleryFiles(files) {
+    if (!replacementTarget) {
+        return;
+    }
+    const validFiles = Array.from(files).filter(isImageFile);
+    if (!validFiles.length) {
+        notify('warning', '请选择图片文件。');
+        return;
+    }
+
+    setGalleryBusy(true);
+    try {
+        const records = await addGalleryRecords(replacementTarget.key, validFiles);
+        galleryPendingSelectionId = records[0]?.id || '';
+        await renderAvatarGallery();
+        notify('success', '已导入 ' + records.length + ' 张头像图片。');
+    } catch (error) {
+        console.error('[Avatar Focus] Avatar library import failed:', error);
+        notify('error', '导入失败：' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+        setGalleryBusy(false);
+    }
+}
+
+async function selectGalleryRecord(id = getCurrentGalleryRecord()?.id) {
+    const record = galleryEntries.get(id);
+    const target = replacementTarget;
+    if (!record || !target) {
+        return;
+    }
+
+    setGalleryBusy(true);
+    try {
+        const file = new File([record.blob], record.name || 'avatar.png', { type: record.type || record.blob.type || 'image/png' });
+        const success = target.kind === 'persona'
+            ? await replacePersonaAvatar(file, target)
+            : await replaceCharacterAvatar(file, target);
+        if (success) {
+            getSettings().libraryActive[target.key] = record.id;
+            saveSettingsDebounced();
+            await renderAvatarGallery();
+        }
+    } finally {
+        setGalleryBusy(false);
+    }
+}
+
+async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
+    const record = galleryEntries.get(id);
+    const target = replacementTarget;
+    if (!record || !target) {
+        return;
+    }
+    if (!window.confirm('确定从头像库删除“' + (record.name || '这张图片') + '”吗？当前已经显示的头像不会被还原。')) {
+        return;
+    }
+
+    setGalleryBusy(true);
+    try {
+        const nextRecord = galleryRecordOrder.length > 1
+            ? (galleryRecordOrder[galleryCursor + 1] || galleryRecordOrder[galleryCursor - 1])
+            : null;
+        galleryPendingSelectionId = nextRecord?.id || '';
+        await deleteGalleryRecord(id);
+        if (getSettings().libraryActive[target.key] === id) {
+            delete getSettings().libraryActive[target.key];
+            saveSettingsDebounced();
+        }
+        await renderAvatarGallery();
+    } catch (error) {
+        console.error('[Avatar Focus] Avatar library delete failed:', error);
+        notify('error', '删除失败：' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+        setGalleryBusy(false);
     }
 }
 
@@ -1168,12 +1545,86 @@ function bindTripleClickReplacement() {
     document.addEventListener('click', handleAvatarClickSequence, true);
     const input = document.getElementById('stafe_replace_input');
     input?.addEventListener('change', (event) => {
-        const file = event.target.files?.[0];
-        if (!file) {
-            replacementTarget = null;
+        const files = Array.from(event.target.files || []);
+        if (!files.length) {
             return;
         }
-        void replaceCharacterAvatar(file);
+        void importGalleryFiles(files).finally(() => {
+            event.target.value = '';
+        });
+    });
+}
+
+function bindAvatarGallery() {
+    const gallery = document.getElementById('stafe_gallery');
+    const input = document.getElementById('stafe_replace_input');
+    const carousel = document.getElementById('stafe_gallery_carousel');
+    if (!gallery || !(input instanceof HTMLInputElement)) {
+        return;
+    }
+
+    let swipeStart = null;
+
+    gallery.addEventListener('click', (event) => {
+        const actionTarget = event.target instanceof Element
+            ? event.target.closest('[data-stafe-gallery-action]')
+            : null;
+        const action = actionTarget?.dataset.stafeGalleryAction;
+        if (!action) {
+            return;
+        }
+        if (action === 'close') {
+            closeAvatarGallery();
+        } else if (action === 'import') {
+            input.value = '';
+            input.click();
+        } else if (action === 'previous') {
+            moveGalleryCursor(-1);
+        } else if (action === 'next') {
+            moveGalleryCursor(1);
+        } else if (action === 'select') {
+            void selectGalleryRecord();
+        } else if (action === 'delete') {
+            void removeGalleryRecord();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (gallery.hidden) {
+            return;
+        }
+        if (event.key === 'Escape') {
+            closeAvatarGallery();
+        } else if (event.key === 'ArrowLeft') {
+            moveGalleryCursor(-1);
+        } else if (event.key === 'ArrowRight') {
+            moveGalleryCursor(1);
+        }
+    });
+
+    carousel?.addEventListener('pointerdown', (event) => {
+        if (event.target instanceof Element && event.target.closest('button')) {
+            return;
+        }
+        swipeStart = {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+        };
+    });
+    carousel?.addEventListener('pointerup', (event) => {
+        if (!swipeStart || swipeStart.pointerId !== event.pointerId) {
+            return;
+        }
+        const deltaX = event.clientX - swipeStart.x;
+        const deltaY = event.clientY - swipeStart.y;
+        swipeStart = null;
+        if (Math.abs(deltaX) >= 44 && Math.abs(deltaX) > Math.abs(deltaY)) {
+            moveGalleryCursor(deltaX < 0 ? 1 : -1);
+        }
+    });
+    carousel?.addEventListener('pointercancel', () => {
+        swipeStart = null;
     });
 }
 
@@ -1305,6 +1756,15 @@ async function installEditor() {
     bindEditor();
 }
 
+async function installAvatarGallery() {
+    if (document.getElementById('stafe_gallery')) {
+        return;
+    }
+    const html = await loadOwnTemplate('gallery');
+    document.body.insertAdjacentHTML('beforeend', html);
+    bindAvatarGallery();
+}
+
 async function initialize() {
     getSettings();
     updateEditorViewportHeight();
@@ -1313,6 +1773,7 @@ async function initialize() {
     window.visualViewport?.addEventListener('scroll', updateEditorViewportHeight, { passive: true });
     try {
         await installEditor();
+        await installAvatarGallery();
         await installSettingsPanel();
     } catch (error) {
         console.error('[Avatar Focus] UI initialization failed:', error);
@@ -1321,7 +1782,7 @@ async function initialize() {
     bindLongPress();
     bindTripleClickReplacement();
     observeAvatars();
-    console.info('[Avatar Focus] Ready. Long-press to adjust; triple-click to replace.');
+    console.info('[Avatar Focus] Ready. Long-press to adjust; triple-click to open avatar library.');
 }
 
 if (document.readyState === 'loading') {
