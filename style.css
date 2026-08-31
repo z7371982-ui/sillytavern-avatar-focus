@@ -278,16 +278,6 @@ img.stafe-holding {
   user-select: none !important;
 }
 
-#chat .mesAvatarWrapper,
-#chat .mesAvatarWrapper *,
-#chat .mes [class*="avatar-frame"],
-#chat .mes [class*="avatar-mask"],
-#chat .mes [class*="avatar-border"] {
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
 @media (max-width: 520px) {
   .stafe-editor {
     place-items: end center;

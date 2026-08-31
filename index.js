@@ -417,12 +417,12 @@ function pointInsideRect(x, y, rect, padding = 0) {
 
 function findAvatarFromInteraction(target, clientX, clientY) {
     const direct = findAvatarFromTarget(target);
-    if (direct) {
+    const hasPointerLocation = Number.isFinite(clientX) && Number.isFinite(clientY);
+    if (direct && (!hasPointerLocation
+        || pointInsideRect(clientX, clientY, direct.getBoundingClientRect(), 8))) {
         return direct;
     }
-    if (!(target instanceof Element)
-        || !Number.isFinite(clientX)
-        || !Number.isFinite(clientY)) {
+    if (!(target instanceof Element) || !hasPointerLocation) {
         return null;
     }
 
@@ -438,7 +438,7 @@ function findAvatarFromInteraction(target, clientX, clientY) {
                 image,
                 rect,
                 score: avatarCandidateScore(image),
-                containsPoint: pointInsideRect(clientX, clientY, rect, 18),
+                containsPoint: pointInsideRect(clientX, clientY, rect, 8),
             };
         })
         .filter((candidate) => candidate.containsPoint)
@@ -447,10 +447,6 @@ function findAvatarFromInteraction(target, clientX, clientY) {
         return candidates[0].image;
     }
 
-    const wrapper = message.querySelector('.mesAvatarWrapper');
-    if (wrapper && pointInsideRect(clientX, clientY, wrapper.getBoundingClientRect(), 24)) {
-        return bestAvatarImage(message.querySelectorAll('img'));
-    }
     return null;
 }
 
