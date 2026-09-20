@@ -226,9 +226,28 @@ body.stafe-modal-open {
 
 .stafe-controls label > span {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
   font-size: 0.86rem;
+}
+
+.stafe-controls label > small {
+  opacity: 0.68;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.stafe-inline-reset {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0.18rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 65%, transparent);
+  border-radius: 999px;
+  color: inherit;
+  background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 9%, transparent);
+  font-size: 0.75rem;
+  cursor: pointer;
 }
 
 .stafe-controls output {

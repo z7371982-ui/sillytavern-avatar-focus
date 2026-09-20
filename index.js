@@ -30,12 +30,16 @@ const DEFAULTS = Object.freeze({
     tripleClickEnabled: true,
     longPressMs: 450,
     positions: {},
+    saturations: {},
     libraryActive: {},
 });
 const TRIPLE_CLICK_WINDOW_MS = 420;
 const MIN_ZOOM = 50;
 const MAX_ZOOM = 300;
 const DEFAULT_ZOOM = 100;
+const MIN_SATURATION = 0;
+const MAX_SATURATION = 300;
+const DEFAULT_SATURATION = 100;
 const LIBRARY_DB_NAME = 'sillytavern-avatar-focus-library';
 const LIBRARY_STORE_NAME = 'images';
 const LIBRARY_DB_VERSION = 1;
@@ -209,6 +213,9 @@ function getSettings() {
     if (!current.positions || typeof current.positions !== 'object' || Array.isArray(current.positions)) {
         current.positions = {};
     }
+    if (!current.saturations || typeof current.saturations !== 'object' || Array.isArray(current.saturations)) {
+        current.saturations = {};
+    }
     if (!current.libraryActive || typeof current.libraryActive !== 'object' || Array.isArray(current.libraryActive)) {
         current.libraryActive = {};
     }
@@ -251,6 +258,17 @@ function roundPosition(value) {
 
 function roundZoom(value) {
     return Math.round(clamp(value, MIN_ZOOM, MAX_ZOOM));
+}
+
+function cleanSaturation(value) {
+    const saturation = Number(value);
+    return Number.isFinite(saturation)
+        ? clamp(saturation, MIN_SATURATION, MAX_SATURATION)
+        : null;
+}
+
+function roundSaturation(value) {
+    return Math.round(clamp(value, MIN_SATURATION, MAX_SATURATION));
 }
 
 function getZoomClipPath(position) {
@@ -327,6 +345,21 @@ function getImageKey(image) {
     } catch {
         return 'raw:' + smallHash(source);
     }
+}
+
+function getLibrarySaturationKey(imageKey, recordId) {
+    return imageKey + '::library::' + recordId;
+}
+
+function getSaturationKey(image) {
+    const imageKey = getImageKey(image);
+    if (!imageKey) {
+        return '';
+    }
+    const activeLibraryId = getSettings().libraryActive[imageKey];
+    return activeLibraryId
+        ? getLibrarySaturationKey(imageKey, activeLibraryId)
+        : imageKey;
 }
 
 function avatarCandidateScore(image) {
@@ -557,8 +590,17 @@ function getZoomSource(image) {
     };
 }
 
+function stripThemeSaturation(filterValue) {
+    const filtered = String(filterValue || '')
+        .replace(/\b(?:saturate|grayscale)\([^)]*\)/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return filtered === 'none' ? '' : filtered;
+}
+
 function rememberOriginalPosition(image) {
     if (!originalObjectPositions.has(image)) {
+        const computedFilter = getComputedStyle(image).filter;
         originalObjectPositions.set(image, {
             value: image.style.getPropertyValue('object-position'),
             priority: image.style.getPropertyPriority('object-position'),
@@ -578,6 +620,9 @@ function rememberOriginalPosition(image) {
             backgroundPositionPriority: image.style.getPropertyPriority('background-position'),
             backgroundRepeatValue: image.style.getPropertyValue('background-repeat'),
             backgroundRepeatPriority: image.style.getPropertyPriority('background-repeat'),
+            filterValue: image.style.getPropertyValue('filter'),
+            filterPriority: image.style.getPropertyPriority('filter'),
+            filterWithoutSaturation: stripThemeSaturation(computedFilter),
         });
     }
 }
@@ -602,6 +647,22 @@ function restoreImagePosition(image) {
     restoreOriginalProperty(image, 'background-size', original.backgroundSizeValue, original.backgroundSizePriority);
     restoreOriginalProperty(image, 'background-position', original.backgroundPositionValue, original.backgroundPositionPriority);
     restoreOriginalProperty(image, 'background-repeat', original.backgroundRepeatValue, original.backgroundRepeatPriority);
+}
+
+function restoreImageSaturation(image) {
+    rememberOriginalPosition(image);
+    const original = originalObjectPositions.get(image);
+    restoreOriginalProperty(image, 'filter', original.filterValue, original.filterPriority);
+}
+
+function setImageSaturation(image, saturation) {
+    rememberOriginalPosition(image);
+    const original = originalObjectPositions.get(image);
+    const filter = [
+        original.filterWithoutSaturation,
+        `saturate(${roundSaturation(saturation)}%)`,
+    ].filter(Boolean).join(' ');
+    image.style.setProperty('filter', filter, 'important');
 }
 
 function restoreZoomOutRendering(image, original) {
@@ -695,13 +756,21 @@ function applySavedPosition(image) {
     }
     if (!getSettings().enabled) {
         restoreImagePosition(image);
+        restoreImageSaturation(image);
         return;
     }
-    const position = cleanPosition(getSettings().positions[getImageKey(image)]);
+    const settings = getSettings();
+    const position = cleanPosition(settings.positions[getImageKey(image)]);
     if (position) {
         setImagePosition(image, position);
     } else {
         restoreImagePosition(image);
+    }
+    const saturation = cleanSaturation(settings.saturations[getSaturationKey(image)]);
+    if (saturation === null) {
+        restoreImageSaturation(image);
+    } else {
+        setImageSaturation(image, saturation);
     }
 }
 
@@ -718,7 +787,10 @@ function applyAllSavedPositions() {
 }
 
 function restoreAllPositions() {
-    forEachAvatar(restoreImagePosition);
+    forEachAvatar((image) => {
+        restoreImagePosition(image);
+        restoreImageSaturation(image);
+    });
 }
 
 function applyPositionForKey(key, position) {
@@ -730,6 +802,27 @@ function applyPositionForKey(key, position) {
             setImagePosition(image, position);
         } else {
             restoreImagePosition(image);
+        }
+    });
+}
+
+function applySaturationForKey(key, saturation) {
+    forEachAvatar((image) => {
+        if (getSaturationKey(image) !== key) {
+            return;
+        }
+        if (saturation === null) {
+            restoreImageSaturation(image);
+        } else {
+            setImageSaturation(image, saturation);
+        }
+    });
+}
+
+function applySavedAdjustmentsForImageKey(key) {
+    forEachAvatar((image) => {
+        if (getImageKey(image) === key) {
+            applySavedPosition(image);
         }
     });
 }
@@ -1095,8 +1188,16 @@ async function saveCurrentAvatarIfLibraryEmpty() {
             original: true,
         });
         if (record) {
+            const settings = getSettings();
+            const existingSaturation = cleanSaturation(settings.saturations[replacementTarget.key]);
+            const recordSaturationKey = getLibrarySaturationKey(replacementTarget.key, record.id);
+            if (existingSaturation !== null && !Object.hasOwn(settings.saturations, recordSaturationKey)) {
+                settings.saturations[recordSaturationKey] = existingSaturation;
+                delete settings.saturations[replacementTarget.key];
+            }
             getSettings().libraryActive[replacementTarget.key] = record.id;
             saveSettingsDebounced();
+            applySavedAdjustmentsForImageKey(replacementTarget.key);
             if (replacementTarget.kind === 'persona') {
                 void prepareZoomLibrarySource(replacementTarget.key, record);
             }
@@ -1192,6 +1293,7 @@ async function selectGalleryRecord(id = getCurrentGalleryRecord()?.id) {
         if (success) {
             getSettings().libraryActive[target.key] = record.id;
             saveSettingsDebounced();
+            applySavedAdjustmentsForImageKey(target.key);
             if (target.kind === 'persona') {
                 void prepareZoomLibrarySource(target.key, record);
             }
@@ -1219,11 +1321,13 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
             : null;
         galleryPendingSelectionId = nextRecord?.id || '';
         await deleteGalleryRecord(id);
+        delete getSettings().saturations[getLibrarySaturationKey(target.key, id)];
         if (getSettings().libraryActive[target.key] === id) {
             delete getSettings().libraryActive[target.key];
             releaseZoomLibrarySource(target.key);
-            saveSettingsDebounced();
+            applySavedAdjustmentsForImageKey(target.key);
         }
+        saveSettingsDebounced();
         await renderAvatarGallery();
     } catch (error) {
         console.error('[Avatar Focus] Avatar library delete failed:', error);
@@ -1412,18 +1516,28 @@ function renderEditorPosition(position, applyLive = true) {
         x: roundPosition(position.x),
         y: roundPosition(position.y),
         zoom: roundZoom(position.zoom ?? DEFAULT_ZOOM),
+        saturation: roundSaturation(
+            position.saturation ?? editorState.draft?.saturation ?? DEFAULT_SATURATION,
+        ),
     };
     editorState.draft = clean;
     const preview = document.getElementById('stafe_preview_image');
     const xInput = document.getElementById('stafe_x_position');
     const yInput = document.getElementById('stafe_y_position');
     const zoomInput = document.getElementById('stafe_zoom');
+    const saturationInput = document.getElementById('stafe_saturation');
     const xValue = document.getElementById('stafe_x_value');
     const yValue = document.getElementById('stafe_y_value');
     const zoomValue = document.getElementById('stafe_zoom_value');
+    const saturationValue = document.getElementById('stafe_saturation_value');
     preview.style.setProperty('object-position', clean.x + '% ' + clean.y + '%', 'important');
     preview.style.setProperty('scale', String(clean.zoom / 100), 'important');
     preview.style.setProperty('transform-origin', clean.x + '% ' + clean.y + '%', 'important');
+    preview.style.setProperty(
+        'filter',
+        [editorState.filterWithoutSaturation, `saturate(${clean.saturation}%)`].filter(Boolean).join(' '),
+        'important',
+    );
     const previewClipPath = getZoomClipPath(clean);
     if (previewClipPath) {
         preview.style.setProperty('clip-path', previewClipPath, 'important');
@@ -1433,11 +1547,14 @@ function renderEditorPosition(position, applyLive = true) {
     xInput.value = String(clean.x);
     yInput.value = String(clean.y);
     zoomInput.value = String(clean.zoom);
+    saturationInput.value = String(clean.saturation);
     xValue.textContent = Math.round(clean.x) + '%';
     yValue.textContent = Math.round(clean.y) + '%';
     zoomValue.textContent = clean.zoom + '%';
+    saturationValue.textContent = clean.saturation + '%';
     if (applyLive) {
         applyPositionForKey(editorState.key, clean);
+        applySaturationForKey(editorState.saturationKey, clean.saturation);
     }
 }
 
@@ -1456,11 +1573,21 @@ function openEditor(image) {
         return;
     }
     const saved = cleanPosition(getSettings().positions[key]);
-    const start = saved || readComputedPosition(image);
+    const saturationKey = getSaturationKey(image);
+    const savedSaturation = cleanSaturation(getSettings().saturations[saturationKey]);
+    const start = {
+        ...(saved || readComputedPosition(image)),
+        saturation: savedSaturation ?? DEFAULT_SATURATION,
+    };
+    rememberOriginalPosition(image);
+    const original = originalObjectPositions.get(image);
     editorState = {
         image,
         key,
+        saturationKey,
         initialSaved: saved ? { ...saved } : null,
+        initialSaturation: savedSaturation,
+        filterWithoutSaturation: original.filterWithoutSaturation,
         draft: { ...start },
         drag: null,
     };
@@ -1498,12 +1625,15 @@ function closeEditor(commit) {
             y: roundPosition(state.draft.y),
             zoom: roundZoom(state.draft.zoom),
         };
+        getSettings().saturations[state.saturationKey] = roundSaturation(state.draft.saturation);
         applyPositionForKey(state.key, state.draft);
+        applySaturationForKey(state.saturationKey, state.draft.saturation);
         saveSettingsDebounced();
         updateSavedCount();
-        notify('success', '头像位置与缩放已保存。');
+        notify('success', '头像位置、缩放与饱和度已保存。');
     } else {
         applyPositionForKey(state.key, state.initialSaved);
+        applySaturationForKey(state.saturationKey, state.initialSaturation);
     }
 
     const editor = document.getElementById('stafe_editor');
@@ -1550,7 +1680,8 @@ function bindEditor() {
     const xInput = document.getElementById('stafe_x_position');
     const yInput = document.getElementById('stafe_y_position');
     const zoomInput = document.getElementById('stafe_zoom');
-    if (!editor || !frame || !preview || !xInput || !yInput || !zoomInput) {
+    const saturationInput = document.getElementById('stafe_saturation');
+    if (!editor || !frame || !preview || !xInput || !yInput || !zoomInput || !saturationInput) {
         return;
     }
 
@@ -1562,6 +1693,13 @@ function bindEditor() {
             closeEditor(false);
         } else if (action === 'center') {
             renderEditorPosition({ x: 50, y: 50, zoom: editorState.draft.zoom });
+        } else if (action === 'natural-color') {
+            renderEditorPosition({
+                x: editorState.draft.x,
+                y: editorState.draft.y,
+                zoom: editorState.draft.zoom,
+                saturation: DEFAULT_SATURATION,
+            });
         }
     });
 
@@ -1589,6 +1727,16 @@ function bindEditor() {
                 x: editorState.draft.x,
                 y: editorState.draft.y,
                 zoom: Number(zoomInput.value),
+            });
+        }
+    });
+    saturationInput.addEventListener('input', () => {
+        if (editorState) {
+            renderEditorPosition({
+                x: editorState.draft.x,
+                y: editorState.draft.y,
+                zoom: editorState.draft.zoom,
+                saturation: Number(saturationInput.value),
             });
         }
     });
@@ -1924,24 +2072,34 @@ function observeAvatars() {
 function updateSavedCount() {
     const target = document.getElementById('stafe_saved_count');
     if (target) {
-        target.textContent = String(Object.keys(getSettings().positions).length);
+        const settings = getSettings();
+        const saturationKeys = Object.keys(settings.saturations);
+        const savedImages = new Set(saturationKeys);
+        Object.keys(settings.positions).forEach((positionKey) => {
+            if (!saturationKeys.some((key) => key === positionKey || key.startsWith(positionKey + '::library::'))) {
+                savedImages.add(positionKey);
+            }
+        });
+        target.textContent = String(savedImages.size);
     }
 }
 
 function clearAllSavedPositions() {
-    const count = Object.keys(getSettings().positions).length;
+    const settings = getSettings();
+    const count = Object.keys(settings.positions).length + Object.keys(settings.saturations).length;
     if (!count) {
-        notify('info', '还没有保存过头像位置。');
+        notify('info', '还没有保存过头像调整。');
         return;
     }
-    if (!window.confirm('确定要让全部 ' + count + ' 个头像恢复主题默认位置吗？')) {
+    if (!window.confirm('确定要让全部头像恢复主题默认的取景、缩放和颜色吗？')) {
         return;
     }
-    getSettings().positions = {};
+    settings.positions = {};
+    settings.saturations = {};
     restoreAllPositions();
     saveSettingsDebounced();
     updateSavedCount();
-    notify('success', '全部头像已恢复主题默认位置。');
+    notify('success', '全部头像已恢复主题默认显示。');
 }
 
 async function installSettingsPanel() {

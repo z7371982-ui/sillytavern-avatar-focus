@@ -3,7 +3,7 @@
   <section class="stafe-dialog" role="dialog" aria-modal="true" aria-labelledby="stafe_editor_title">
     <header class="stafe-dialog-header">
       <div>
-        <h2 id="stafe_editor_title">调整头像取景</h2>
+        <h2 id="stafe_editor_title">调整头像取景与颜色</h2>
         <p id="stafe_avatar_name">当前头像</p>
       </div>
       <button class="stafe-icon-button" data-stafe-action="cancel" type="button" aria-label="关闭">
@@ -25,6 +25,14 @@
         <label>
           <span>缩放 <output id="stafe_zoom_value">100%</output></span>
           <input id="stafe_zoom" type="range" min="50" max="300" step="5" value="100">
+        </label>
+        <label>
+          <span>
+            <span>饱和度 <output id="stafe_saturation_value">100%</output></span>
+            <button class="stafe-inline-reset" data-stafe-action="natural-color" type="button">原色 100%</button>
+          </span>
+          <input id="stafe_saturation" type="range" min="0" max="300" step="5" value="100">
+          <small>0% 为黑白，100% 为图片原色，继续提高可增强显色。</small>
         </label>
         <label>
           <span>取景：左 <output id="stafe_x_value">50%</output> 右</span>
