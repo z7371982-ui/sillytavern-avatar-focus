@@ -45,6 +45,8 @@ const LIBRARY_STORE_NAME = 'images';
 const LIBRARY_DB_VERSION = 1;
 
 const originalObjectPositions = new WeakMap();
+const rotationFrames = new Map();
+const rotationFailures = new Set();
 const avatarResizeObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver((entries) => entries.forEach(({ target }) => queueMutationImage(target)))
     : null;
@@ -252,6 +254,7 @@ function cleanPosition(value) {
         x: clamp(x),
         y: clamp(y),
         zoom: Number.isFinite(zoom) ? clamp(zoom, MIN_ZOOM, MAX_ZOOM) : DEFAULT_ZOOM,
+        rotation: Math.round(clamp(value.rotation ?? 0, 0, 360)),
     };
 }
 
@@ -506,6 +509,7 @@ function loadZoomLibrarySource(record) {
             url,
             width: probe.naturalWidth,
             height: probe.naturalHeight,
+            image: probe,
         });
         probe.onerror = () => {
             URL.revokeObjectURL(url);
@@ -557,10 +561,11 @@ async function prepareZoomLibrarySource(key, preferredRecord = null) {
             URL.revokeObjectURL(previous.url);
         }
         const livePosition = editorState?.key === key
-            ? editorState.position
+            ? editorState.draft
             : cleanPosition(getSettings().positions[key]);
         if (livePosition) {
             applyPositionForKey(key, livePosition);
+            if (editorState?.key === key) renderEditorPosition(editorState.draft, false);
         }
         return source;
     })().catch((error) => {
@@ -576,6 +581,7 @@ async function prepareZoomLibrarySource(key, preferredRecord = null) {
 }
 
 function getZoomSource(image) {
+    if (image.id === 'stafe_preview_image' && editorState) return getZoomSource(editorState.image);
     const key = getImageKey(image);
     const activeId = getSettings().libraryActive[key] || '';
     const cached = zoomLibrarySources.get(key);
@@ -590,6 +596,7 @@ function getZoomSource(image) {
         url: image.currentSrc || image.getAttribute('src') || image.src || '',
         width: image.naturalWidth,
         height: image.naturalHeight,
+        image,
     };
 }
 
@@ -716,6 +723,70 @@ function setZoomOutRendering(image, position, zoom, original) {
     return true;
 }
 
+function setRotatedRendering(image, position, original) {
+    const angle = Math.round(clamp(position.rotation ?? 0, 0, 360)) % 360;
+    if (!angle) return false;
+    const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
+    const source = zoom < DEFAULT_ZOOM ? getZoomSource(image) : {
+        image, url: image.currentSrc || image.src, width: image.naturalWidth, height: image.naturalHeight,
+    };
+    const width = image.clientWidth;
+    const height = image.clientHeight;
+    if (!source.image?.complete || !source.width || !source.height || !width || !height) return false;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2, 1024 / Math.max(width, height));
+    const x = roundPosition(position.x) / 100;
+    const y = roundPosition(position.y) / 100;
+    const key = JSON.stringify([source.url, width, height, ratio, zoom, x, y, angle, original.computedFit]);
+    let url = rotationFrames.get(key);
+    if (!url) {
+        const cover = Math.max(width / source.width, height / source.height);
+        const contain = Math.min(width / source.width, height / source.height);
+        let scale = cover;
+        if (zoom < DEFAULT_ZOOM) {
+            scale = contain + (cover - contain) * (zoom - MIN_ZOOM) / (DEFAULT_ZOOM - MIN_ZOOM);
+        } else {
+            if (original.computedFit === 'contain') scale = contain;
+            else if (original.computedFit === 'none') scale = 1;
+            else if (original.computedFit === 'scale-down') scale = Math.min(1, contain);
+            scale *= zoom / 100;
+        }
+        const fill = zoom >= DEFAULT_ZOOM && original.computedFit === 'fill';
+        const drawWidth = fill ? width * zoom / 100 : source.width * scale;
+        const drawHeight = fill ? height * zoom / 100 : source.height * scale;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(width * ratio));
+        canvas.height = Math.max(1, Math.round(height * ratio));
+        const context = canvas.getContext('2d');
+        if (!context) return false;
+        context.scale(canvas.width / width, canvas.height / height);
+        context.translate(width / 2, height / 2);
+        context.rotate(angle * Math.PI / 180);
+        try {
+            context.drawImage(source.image, (width - drawWidth) * x - width / 2, (height - drawHeight) * y - height / 2, drawWidth, drawHeight);
+            url = canvas.toDataURL('image/png');
+        } catch (error) {
+            if (!rotationFailures.has(source.url)) {
+                rotationFailures.add(source.url);
+                console.warn('[Avatar Focus] Rotation unavailable:', error);
+                notify('warning', '这张图片暂时无法旋转，请导入头像库后再试。');
+            }
+            return false;
+        }
+        rotationFrames.set(key, url);
+        if (rotationFrames.size > 24) rotationFrames.delete(rotationFrames.keys().next().value);
+    }
+    restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+    restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+    restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+    image.style.setProperty('object-fit', 'none', 'important');
+    image.style.setProperty('object-position', '-100000px -100000px', 'important');
+    image.style.setProperty('background-image', zoomCssUrl(url), 'important');
+    image.style.setProperty('background-size', '100% 100%', 'important');
+    image.style.setProperty('background-position', 'center', 'important');
+    image.style.setProperty('background-repeat', 'no-repeat', 'important');
+    return true;
+}
+
 function setImagePosition(image, position) {
     rememberOriginalPosition(image);
     const zoom = roundZoom(position.zoom ?? DEFAULT_ZOOM);
@@ -725,6 +796,7 @@ function setImagePosition(image, position) {
         'important',
     );
     const original = originalObjectPositions.get(image);
+    if (setRotatedRendering(image, position, original)) return;
     if (zoom < DEFAULT_ZOOM && setZoomOutRendering(image, position, zoom, original)) {
         return;
     }
@@ -1534,6 +1606,7 @@ function renderEditorPosition(position, applyLive = true) {
         x: roundPosition(position.x),
         y: roundPosition(position.y),
         zoom: roundZoom(position.zoom ?? DEFAULT_ZOOM),
+        rotation: Math.round(clamp(position.rotation ?? editorState.draft?.rotation ?? 0, 0, 360)),
         saturation: roundSaturation(
             position.saturation ?? editorState.draft?.saturation ?? DEFAULT_SATURATION,
         ),
@@ -1562,6 +1635,8 @@ function renderEditorPosition(position, applyLive = true) {
     yValue.textContent = Math.round(clean.y) + '%';
     zoomValue.textContent = clean.zoom + '%';
     saturationValue.textContent = clean.saturation + '%';
+    document.getElementById('stafe_rotation').value = String(clean.rotation);
+    document.getElementById('stafe_rotation_value').textContent = clean.rotation + '°';
     if (applyLive) {
         applyPositionForKey(editorState.key, clean);
         applySaturationForKey(editorState.saturationKey, clean.saturation);
@@ -1639,13 +1714,14 @@ function closeEditor(commit) {
             x: roundPosition(state.draft.x),
             y: roundPosition(state.draft.y),
             zoom: roundZoom(state.draft.zoom),
+            rotation: state.draft.rotation,
         };
         getSettings().saturations[state.saturationKey] = roundSaturation(state.draft.saturation);
         applyPositionForKey(state.key, state.draft);
         applySaturationForKey(state.saturationKey, state.draft.saturation);
         saveSettingsDebounced();
         updateSavedCount();
-        notify('success', '头像位置、缩放与饱和度已保存。');
+        notify('success', '头像位置、缩放、旋转与饱和度已保存。');
     } else {
         applyPositionForKey(state.key, state.initialSaved);
         applySaturationForKey(state.saturationKey, state.initialSaturation);
@@ -1702,6 +1778,9 @@ function bindEditor() {
     preview.addEventListener('load', () => {
         if (editorState) renderEditorPosition(editorState.draft, false);
     });
+    document.getElementById('stafe_rotation').addEventListener('input', (event) => {
+        if (editorState) renderEditorPosition({ ...editorState.draft, rotation: Number(event.target.value) });
+    });
 
     editor.addEventListener('click', (event) => {
         const action = event.target.closest('[data-stafe-action]')?.dataset.stafeAction;
@@ -1711,6 +1790,8 @@ function bindEditor() {
             closeEditor(false);
         } else if (action === 'center') {
             renderEditorPosition({ x: 50, y: 50, zoom: editorState.draft.zoom });
+        } else if (action === 'reset-rotation' && editorState) {
+            renderEditorPosition({ ...editorState.draft, rotation: 0 });
         } else if (action === 'natural-color') {
             renderEditorPosition({
                 x: editorState.draft.x,
@@ -1783,8 +1864,11 @@ function bindEditor() {
             return;
         }
         event.preventDefault();
-        const deltaX = event.clientX - drag.startClientX;
-        const deltaY = event.clientY - drag.startClientY;
+        const screenDeltaX = event.clientX - drag.startClientX;
+        const screenDeltaY = event.clientY - drag.startClientY;
+        const angle = (editorState.draft.rotation || 0) * Math.PI / 180;
+        const deltaX = screenDeltaX * Math.cos(angle) + screenDeltaY * Math.sin(angle);
+        const deltaY = -screenDeltaX * Math.sin(angle) + screenDeltaY * Math.cos(angle);
         const denominatorX = Math.max(drag.overflow.x, frame.clientWidth * 0.32);
         const denominatorY = Math.max(drag.overflow.y, frame.clientHeight * 0.32);
         const next = {

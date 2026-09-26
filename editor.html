@@ -35,6 +35,11 @@
           <small>0% 为黑白，100% 为图片原色，继续提高可增强显色。</small>
         </label>
         <label>
+          <span>旋转 <output id="stafe_rotation_value">0°</output></span>
+          <input id="stafe_rotation" type="range" min="0" max="360" step="1" value="0">
+        </label>
+        <button class="stafe-inline-reset" data-stafe-action="reset-rotation" type="button">恢复角度 0°</button>
+        <label>
           <span>取景：左 <output id="stafe_x_value">50%</output> 右</span>
           <input id="stafe_x_position" type="range" min="0" max="100" step="1" value="50">
         </label>
