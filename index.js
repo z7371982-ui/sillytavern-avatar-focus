@@ -709,9 +709,9 @@ function setZoomOutRendering(image, position, zoom, original) {
     restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
     image.style.setProperty('object-fit', 'none', 'important');
     image.style.setProperty('object-position', '-100000px -100000px', 'important');
-    image.style.setProperty('background-image', `${layer}, ${layer}`, 'important');
-    image.style.setProperty('background-size', `${renderedWidth}px ${renderedHeight}px, cover`, 'important');
-    image.style.setProperty('background-position', `${x}% ${y}%, ${x}% ${y}%`, 'important');
+    image.style.setProperty('background-image', layer, 'important');
+    image.style.setProperty('background-size', `${renderedWidth}px ${renderedHeight}px`, 'important');
+    image.style.setProperty('background-position', `${x}% ${y}%`, 'important');
     image.style.setProperty('background-repeat', 'no-repeat', 'important');
     return true;
 }
