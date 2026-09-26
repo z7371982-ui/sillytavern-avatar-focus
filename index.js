@@ -45,6 +45,9 @@ const LIBRARY_STORE_NAME = 'images';
 const LIBRARY_DB_VERSION = 1;
 
 const originalObjectPositions = new WeakMap();
+const avatarResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver((entries) => entries.forEach(({ target }) => queueMutationImage(target)))
+    : null;
 const zoomLibrarySources = new Map();
 const zoomLibrarySourcePromises = new Map();
 const replayedClicks = new WeakSet();
@@ -600,6 +603,7 @@ function stripThemeSaturation(filterValue) {
 
 function rememberOriginalPosition(image) {
     if (!originalObjectPositions.has(image)) {
+        if (image.id !== 'stafe_preview_image') avatarResizeObserver?.observe(image);
         const computedFilter = getComputedStyle(image).filter;
         originalObjectPositions.set(image, {
             value: image.style.getPropertyValue('object-position'),
@@ -612,6 +616,7 @@ function rememberOriginalPosition(image) {
             clipPriority: image.style.getPropertyPriority('clip-path'),
             fitValue: image.style.getPropertyValue('object-fit'),
             fitPriority: image.style.getPropertyPriority('object-fit'),
+            computedFit: getComputedStyle(image).objectFit,
             backgroundImageValue: image.style.getPropertyValue('background-image'),
             backgroundImagePriority: image.style.getPropertyPriority('background-image'),
             backgroundSizeValue: image.style.getPropertyValue('background-size'),
@@ -735,18 +740,31 @@ function setImagePosition(image, position) {
         restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
         restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
     } else {
-        image.style.setProperty('scale', String(zoom / 100), 'important');
-        image.style.setProperty(
-            'transform-origin',
-            roundPosition(position.x) + '% ' + roundPosition(position.y) + '%',
-            'important',
-        );
-        const clipPath = getZoomClipPath(position);
-        if (clipPath) {
-            image.style.setProperty('clip-path', clipPath, 'important');
-        } else {
-            restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+        // Scale the pixels inside the theme's unchanged frame and mask.
+        const width = image.clientWidth;
+        const height = image.clientHeight;
+        const naturalWidth = image.naturalWidth;
+        const naturalHeight = image.naturalHeight;
+        if (!width || !height || !naturalWidth || !naturalHeight) return;
+        let fitScale = Math.max(width / naturalWidth, height / naturalHeight);
+        if (original.computedFit === 'contain') {
+            fitScale = Math.min(width / naturalWidth, height / naturalHeight);
+        } else if (original.computedFit === 'none') {
+            fitScale = 1;
+        } else if (original.computedFit === 'scale-down') {
+            fitScale = Math.min(1, width / naturalWidth, height / naturalHeight);
         }
+        const renderedWidth = (original.computedFit === 'fill' ? width : naturalWidth * fitScale) * zoom / 100;
+        const renderedHeight = (original.computedFit === 'fill' ? height : naturalHeight * fitScale) * zoom / 100;
+        restoreOriginalProperty(image, 'scale', original.scaleValue, original.scalePriority);
+        restoreOriginalProperty(image, 'transform-origin', original.originValue, original.originPriority);
+        restoreOriginalProperty(image, 'clip-path', original.clipValue, original.clipPriority);
+        image.style.setProperty('object-fit', 'none', 'important');
+        image.style.setProperty('object-position', '-100000px -100000px', 'important');
+        image.style.setProperty('background-image', zoomCssUrl(image.currentSrc || image.src), 'important');
+        image.style.setProperty('background-size', `${renderedWidth}px ${renderedHeight}px`, 'important');
+        image.style.setProperty('background-position', `${roundPosition(position.x)}% ${roundPosition(position.y)}%`, 'important');
+        image.style.setProperty('background-repeat', 'no-repeat', 'important');
     }
 }
 
@@ -754,19 +772,18 @@ function applySavedPosition(image) {
     if (!isAvatarImage(image)) {
         return;
     }
-    if (!getSettings().enabled) {
-        restoreImagePosition(image);
-        restoreImageSaturation(image);
-        return;
-    }
     const settings = getSettings();
-    const position = cleanPosition(settings.positions[getImageKey(image)]);
+    const position = editorState?.key === getImageKey(image)
+        ? editorState.draft
+        : cleanPosition(settings.positions[getImageKey(image)]);
     if (position) {
         setImagePosition(image, position);
     } else {
         restoreImagePosition(image);
     }
-    const saturation = cleanSaturation(settings.saturations[getSaturationKey(image)]);
+    const saturation = editorState?.saturationKey === getSaturationKey(image)
+        ? editorState.draft.saturation
+        : cleanSaturation(settings.saturations[getSaturationKey(image)]);
     if (saturation === null) {
         restoreImageSaturation(image);
     } else {
@@ -1376,6 +1393,7 @@ function finishClickSequence(replay = true) {
 
 function handleAvatarClickSequence(event) {
     if (replayedClicks.has(event)
+        || !getSettings().enabled
         || !getSettings().tripleClickEnabled
         || editorState) {
         return;
@@ -1435,8 +1453,9 @@ function handleAvatarClickSequence(event) {
 function copyFrameAppearance(source, preview, frame) {
     const imageStyle = getComputedStyle(source);
     const holderStyle = source.parentElement ? getComputedStyle(source.parentElement) : imageStyle;
-    const objectFit = ['cover', 'contain', 'fill', 'none', 'scale-down'].includes(imageStyle.objectFit)
-        ? imageStyle.objectFit
+    const sourceFit = originalObjectPositions.get(source)?.computedFit || imageStyle.objectFit;
+    const objectFit = ['cover', 'contain', 'fill', 'none', 'scale-down'].includes(sourceFit)
+        ? sourceFit
         : 'cover';
     preview.style.objectFit = objectFit;
     preview.style.borderRadius = imageStyle.borderRadius;
@@ -1530,20 +1549,12 @@ function renderEditorPosition(position, applyLive = true) {
     const yValue = document.getElementById('stafe_y_value');
     const zoomValue = document.getElementById('stafe_zoom_value');
     const saturationValue = document.getElementById('stafe_saturation_value');
-    preview.style.setProperty('object-position', clean.x + '% ' + clean.y + '%', 'important');
-    preview.style.setProperty('scale', String(clean.zoom / 100), 'important');
-    preview.style.setProperty('transform-origin', clean.x + '% ' + clean.y + '%', 'important');
+    setImagePosition(preview, clean);
     preview.style.setProperty(
         'filter',
         [editorState.filterWithoutSaturation, `saturate(${clean.saturation}%)`].filter(Boolean).join(' '),
         'important',
     );
-    const previewClipPath = getZoomClipPath(clean);
-    if (previewClipPath) {
-        preview.style.setProperty('clip-path', previewClipPath, 'important');
-    } else {
-        preview.style.removeProperty('clip-path');
-    }
     xInput.value = String(clean.x);
     yInput.value = String(clean.y);
     zoomInput.value = String(clean.zoom);
@@ -1592,6 +1603,10 @@ function openEditor(image) {
         drag: null,
     };
 
+    if (originalObjectPositions.has(preview)) {
+        restoreImagePosition(preview);
+        originalObjectPositions.delete(preview);
+    }
     preview.src = image.currentSrc || image.src;
     preview.alt = getAvatarLabel(image);
     document.getElementById('stafe_avatar_name').textContent = getAvatarLabel(image);
@@ -1610,6 +1625,7 @@ function openEditor(image) {
     requestAnimationFrame(() => {
         updateEditorViewportHeight();
         sizePreviewFrame(image, frame);
+        if (editorState?.image === image) renderEditorPosition(editorState.draft, false);
         editor.querySelector('[data-stafe-action="save"]')?.focus();
     });
 }
@@ -1649,7 +1665,7 @@ function calculatePreviewOverflow(frame, image, zoom = DEFAULT_ZOOM) {
     const height = frame.clientHeight;
     const naturalWidth = image.naturalWidth || width;
     const naturalHeight = image.naturalHeight || height;
-    const fit = getComputedStyle(image).objectFit;
+    const fit = originalObjectPositions.get(image)?.computedFit || getComputedStyle(image).objectFit;
     let scale = 1;
     if (fit === 'contain') {
         scale = Math.min(width / naturalWidth, height / naturalHeight);
@@ -1684,6 +1700,9 @@ function bindEditor() {
     if (!editor || !frame || !preview || !xInput || !yInput || !zoomInput || !saturationInput) {
         return;
     }
+    preview.addEventListener('load', () => {
+        if (editorState) renderEditorPosition(editorState.draft, false);
+    });
 
     editor.addEventListener('click', (event) => {
         const action = event.target.closest('[data-stafe-action]')?.dataset.stafeAction;
@@ -2041,6 +2060,9 @@ function queueMutationImage(image) {
 }
 
 function observeAvatars() {
+    document.addEventListener('load', (event) => {
+        if (event.target instanceof HTMLImageElement) queueMutationImage(event.target);
+    }, true);
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             if (mutation.type === 'attributes') {
@@ -2123,14 +2145,17 @@ async function installSettingsPanel() {
         enabled.addEventListener('change', () => {
             getSettings().enabled = enabled.checked;
             if (enabled.checked) {
-                applyAllSavedPositions();
-                notify('success', '长按头像调整已启用。');
+                notify('success', '长按与三击打开面板已启用。');
             } else {
                 clearPendingPress();
-                restoreAllPositions();
+                finishClickSequence(false);
+                suppressClickUntil = 0;
+                suppressClickKey = '';
                 if (editorState) {
                     closeEditor(false);
                 }
+                closeAvatarGallery();
+                notify('success', '手势弹窗已关闭，已保存的头像效果保持不变。');
             }
             saveSettingsDebounced();
         });
