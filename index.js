@@ -1393,7 +1393,6 @@ function finishClickSequence(replay = true) {
 
 function handleAvatarClickSequence(event) {
     if (replayedClicks.has(event)
-        || !getSettings().enabled
         || !getSettings().tripleClickEnabled
         || editorState) {
         return;
@@ -2145,17 +2144,15 @@ async function installSettingsPanel() {
         enabled.addEventListener('change', () => {
             getSettings().enabled = enabled.checked;
             if (enabled.checked) {
-                notify('success', '长按与三击打开面板已启用。');
+                notify('success', '长按调整已启用。');
             } else {
                 clearPendingPress();
-                finishClickSequence(false);
                 suppressClickUntil = 0;
                 suppressClickKey = '';
                 if (editorState) {
                     closeEditor(false);
                 }
-                closeAvatarGallery();
-                notify('success', '手势弹窗已关闭，已保存的头像效果保持不变。');
+                notify('success', '长按调整已关闭，已保存的头像效果保持不变。');
             }
             saveSettingsDebounced();
         });
@@ -2163,6 +2160,7 @@ async function installSettingsPanel() {
             getSettings().tripleClickEnabled = tripleClickEnabled.checked;
             if (!tripleClickEnabled.checked) {
                 finishClickSequence(true);
+                closeAvatarGallery();
             }
             saveSettingsDebounced();
         });
