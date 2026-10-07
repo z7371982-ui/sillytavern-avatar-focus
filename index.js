@@ -69,6 +69,9 @@ const templateCache = new Map();
 const galleryEntries = new Map();
 const galleryRecordOrder = [];
 const galleryObjectUrls = [];
+let toolsTargets = new Map();
+let toolsReturnFocus = null;
+let toolsOpening = false;
 let galleryCursor = 0;
 let galleryPendingSelectionId = '';
 
@@ -2165,6 +2168,7 @@ function observeAvatars() {
         if (!document.getElementById('stafe_settings')) {
             void installSettingsPanel();
         }
+        installToolsMenuEntry();
     });
     observer.observe(document.body, {
         childList: true,
@@ -2280,6 +2284,119 @@ async function installAvatarGallery() {
     bindAvatarGallery();
 }
 
+function collectToolsTargets() {
+    const targets = new Map();
+    // Use real chat avatar elements even when a decorative overlay receives clicks.
+    const images = Array.from(document.querySelectorAll('#chat .mes img')).reverse();
+    for (const image of images) {
+        if (!isAvatarImage(image)) continue;
+        const key = getImageKey(image);
+        if (key && !targets.has(key)) targets.set(key, image);
+    }
+    return targets;
+}
+
+function closeToolsPanel(restoreFocus = true) {
+    const panel = document.getElementById('stafe_tools');
+    if (panel) {
+        panel.hidden = true;
+        panel.setAttribute('aria-hidden', 'true');
+    }
+    toolsTargets.clear();
+    if (!editorState && document.getElementById('stafe_gallery')?.hidden !== false) {
+        document.body.classList.remove('stafe-modal-open');
+    }
+    if (restoreFocus) toolsReturnFocus?.focus();
+}
+
+async function openToolsPanel() {
+    if (toolsOpening || galleryBusy) return;
+    toolsOpening = true;
+    try {
+        await installEditor();
+        await installAvatarGallery();
+        if (editorState) closeEditor(false);
+        closeAvatarGallery();
+        let panel = document.getElementById('stafe_tools');
+        if (!panel) {
+            document.body.insertAdjacentHTML('beforeend', await loadOwnTemplate('tools'));
+            panel = document.getElementById('stafe_tools');
+            panel.addEventListener('click', (event) => {
+                const action = event.target.closest('[data-stafe-tools]')?.dataset.stafeTools;
+                if (!action) return;
+                if (action === 'close') return closeToolsPanel();
+                const key = document.getElementById('stafe_tools_target').value;
+                const image = toolsTargets.get(key);
+                if (!image?.isConnected || getImageKey(image) !== key) {
+                    notify('info', '聊天头像已变化，请重新打开头像工具选择。');
+                    return closeToolsPanel();
+                }
+                closeToolsPanel(false);
+                if (action === 'adjust') openEditor(image);
+                if (action === 'gallery') chooseAvatarReplacement(image);
+            });
+            panel.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeToolsPanel();
+                } else if (event.key === 'Tab') {
+                    const items = Array.from(panel.querySelectorAll('button, select')).filter((el) => !el.disabled);
+                    const first = items[0], last = items[items.length - 1];
+                    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+                    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+                }
+            });
+        }
+        toolsTargets = collectToolsTargets();
+        if (!toolsTargets.size) {
+            notify('info', '当前聊天还没有可识别的头像，请打开有消息的聊天后再试。');
+            return;
+        }
+        const select = document.getElementById('stafe_tools_target');
+        select.replaceChildren();
+        for (const [key, image] of toolsTargets) {
+            const option = document.createElement('option');
+            option.value = key;
+            const type = image.closest('.mes')?.getAttribute('is_user') === 'true' ? '用户' : '角色';
+            option.textContent = `${type} · ${getAvatarLabel(image)}`;
+            select.append(option);
+        }
+        const updateGalleryButton = () => {
+            panel.querySelector('[data-stafe-tools="gallery"]').disabled = !getReplacementDescriptor(toolsTargets.get(select.value));
+        };
+        select.onchange = updateGalleryButton;
+        updateGalleryButton();
+        toolsReturnFocus = document.getElementById('extensionsMenuButton');
+        updateEditorViewportHeight();
+        panel.hidden = false;
+        panel.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('stafe-modal-open');
+        select.focus();
+    } catch (error) {
+        console.error('[Avatar Focus] Tools menu failed:', error);
+        notify('error', '头像工具加载失败，请更新全部扩展文件并刷新页面。');
+    } finally {
+        toolsOpening = false;
+    }
+}
+
+function installToolsMenuEntry() {
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu || document.getElementById('stafe_tools_menu')) return;
+    const button = document.createElement('button');
+    button.id = 'stafe_tools_menu';
+    button.type = 'button';
+    button.className = 'list-group-item flex-container flexGap5';
+    const icon = document.createElement('i');
+    icon.className = 'fa-solid fa-crop-simple fa-fw';
+    const label = document.createElement('span');
+    label.textContent = '头像工具';
+    button.append(icon, label);
+    button.addEventListener('click', () => { void openToolsPanel(); });
+    menu.append(button);
+}
+
 async function initialize() {
     getSettings();
     updateEditorViewportHeight();
@@ -2297,6 +2414,7 @@ async function initialize() {
     bindLongPress();
     bindTripleClickReplacement();
     observeAvatars();
+    installToolsMenuEntry();
     console.info('[Avatar Focus] Ready. Long-press to adjust; triple-click to open avatar library.');
 }
 
