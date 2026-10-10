@@ -28,6 +28,7 @@ const AVATAR_HIT_REGION_SELECTOR = [
 const DEFAULTS = Object.freeze({
     enabled: true,
     tripleClickEnabled: true,
+    showInWandMenu: true,
     longPressMs: 450,
     positions: {},
     saturations: {},
@@ -214,6 +215,9 @@ function getSettings() {
     }
     if (typeof current.tripleClickEnabled !== 'boolean') {
         current.tripleClickEnabled = DEFAULTS.tripleClickEnabled;
+    }
+    if (typeof current.showInWandMenu !== 'boolean') {
+        current.showInWandMenu = DEFAULTS.showInWandMenu;
     }
     if (![350, 450, 600].includes(Number(current.longPressMs))) {
         current.longPressMs = DEFAULTS.longPressMs;
@@ -2225,6 +2229,13 @@ async function installSettingsPanel() {
         target.insertAdjacentHTML('beforeend', html);
         const enabled = document.getElementById('stafe_enabled');
         const tripleClickEnabled = document.getElementById('stafe_triple_click_enabled');
+        const showInWandMenu = document.getElementById('stafe_show_in_wand_menu');
+        showInWandMenu.checked = getSettings().showInWandMenu;
+        showInWandMenu.addEventListener('change', () => {
+            getSettings().showInWandMenu = showInWandMenu.checked;
+            installToolsMenuEntry();
+            saveSettingsDebounced();
+        });
         const longPress = document.getElementById('stafe_long_press');
         enabled.checked = getSettings().enabled;
         tripleClickEnabled.checked = getSettings().tripleClickEnabled;
@@ -2382,6 +2393,10 @@ async function openToolsPanel() {
 }
 
 function installToolsMenuEntry() {
+    if (!getSettings().showInWandMenu) {
+        document.getElementById('stafe_tools_menu')?.remove();
+        return;
+    }
     const menu = document.getElementById('extensionsMenu');
     if (!menu || document.getElementById('stafe_tools_menu')) return;
     const button = document.createElement('button');
