@@ -469,6 +469,8 @@ html.stafe-compact-viewport .stafe-dialog-actions {
   width: fit-content;
   max-width: 100%;
   height: auto;
+  /* Long filenames must not widen the implicit grid track and shift the image. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto;
   align-content: center;
   margin: 0;
@@ -497,6 +499,7 @@ html.stafe-compact-viewport .stafe-dialog-actions {
 
 .stafe-gallery-figure figcaption {
   display: flex;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 0.8rem;
@@ -508,6 +511,8 @@ html.stafe-compact-viewport .stafe-dialog-actions {
 }
 
 #stafe_gallery_name {
+  flex: 1 1 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
