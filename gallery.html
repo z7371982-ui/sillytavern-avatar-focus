@@ -23,6 +23,25 @@
         </button>
       </div>
       <p class="stafe-gallery-note">用左右箭头翻看，找到后点“使用这张”。图片保存在这个浏览器里。</p>
+      <details class="stafe-backup-controls">
+        <summary>头像库导入 / 导出</summary>
+        <div class="stafe-gallery-toolbar">
+          <button class="menu_button" data-stafe-gallery-action="export-backup" type="button">导出当前图库</button>
+          <button class="menu_button" data-stafe-gallery-action="import-backup" type="button">导入图库备份</button>
+        </div>
+        <p class="stafe-gallery-note">包含原图与每张图的取景、缩放、旋转、饱和度。导入合并到当前图库，不清空、不自动换头像。</p>
+        <input id="stafe_backup_input" type="file" accept=".json,application/json" hidden>
+      </details>
+      <details id="stafe_cycle_settings" class="stafe-cycle-settings" hidden>
+        <summary>此角色的自动轮换</summary>
+        <label class="stafe-cycle-toggle"><input id="stafe_cycle_enabled" type="checkbox"> 开启此角色的头像轮换</label>
+        <label class="stafe-cycle-row" for="stafe_cycle_every">每收到 <input id="stafe_cycle_every" type="number" min="1" step="1" value="3" inputmode="numeric"> 条角色新回复切换一次</label>
+        <label class="stafe-cycle-row" for="stafe_cycle_mode">轮换方式
+          <select id="stafe_cycle_mode"><option value="sequence">顺序循环</option><option value="random">随机不重复</option></select>
+        </label>
+        <p id="stafe_cycle_status" class="stafe-gallery-note" role="status"></p>
+        <p class="stafe-gallery-note">修改立即保存并重新计数。重新生成、左右切换回复、续写不计数。调整面板打开时，轮换会等到关闭后再执行。</p>
+      </details>
       <div id="stafe_gallery_carousel" class="stafe-gallery-carousel" aria-live="polite">
         <button class="stafe-gallery-arrow" data-stafe-gallery-action="previous" type="button" aria-label="上一张">
           <i class="fa-solid fa-chevron-left"></i>

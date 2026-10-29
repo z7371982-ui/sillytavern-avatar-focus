@@ -426,6 +426,27 @@ html.stafe-compact-viewport .stafe-dialog-actions {
   gap: 0.55rem;
 }
 
+.stafe-backup-controls { flex: 0 0 auto; min-width: 0; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 10px; padding: 0.65rem; }
+.stafe-backup-controls summary { cursor: pointer; }
+.stafe-backup-controls .stafe-gallery-toolbar { margin: 0.6rem 0; }
+#stafe_backup_input[hidden] { display: none !important; }
+#stafe_all_file[hidden] { display: none !important; }
+.stafe-all-controls { margin: 1rem 0; }
+#stafe_all_dialog { color: var(--SmartThemeBodyColor, #222); background: var(--SmartThemeBlurTintColor, #fff); width: min(720px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); padding: 16px; border: 1px solid #888; border-radius: 16px; box-sizing: border-box; }
+#stafe_all_dialog::backdrop { background: #0008; }
+#stafe_all_dialog form { display: flex; flex-direction: column; gap: 12px; max-height: calc(100dvh - 60px); }
+#stafe_all_dialog header, #stafe_all_dialog footer, .stafe-all-bulk { display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; flex: 0 0 auto; }
+#stafe_all_dialog h3, #stafe_all_dialog p { margin: 0; }
+#stafe_all_dialog .stafe-all-rows { overflow: auto; min-height: 60px; flex: 1 1 auto; overscroll-behavior: contain; }
+#stafe_all_dialog .stafe-all-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px 0; border-bottom: 1px solid #8885; }
+#stafe_all_dialog .stafe-all-row span { white-space: pre-line; overflow-wrap: anywhere; }
+#stafe_all_dialog select { width: 100%; min-width: 0; }
+#stafe_all_dialog .stafe-all-row input { width: 100%; min-width: 0; box-sizing: border-box; min-height: 40px; }
+#stafe_all_dialog [hidden] { display: none !important; }
+#stafe_all_dialog button, #stafe_all_dialog select { min-height: 40px; font: inherit; }
+#stafe_all_dialog label { display: block; }
+#stafe_all_dialog .stafe-all-confirm { width: 100%; }
+
 .stafe-gallery-note {
   margin: 0;
   opacity: 0.72;
@@ -433,10 +454,31 @@ html.stafe-compact-viewport .stafe-dialog-actions {
   line-height: 1.4;
 }
 
+#stafe_cycle_settings[hidden] { display: none !important; }
+#stafe_cycle_settings {
+  flex: 0 0 auto;
+  min-width: 0;
+  border: 1px solid var(--SmartThemeBorderColor, #777);
+  border-radius: 10px;
+  padding: 0.65rem;
+}
+#stafe_cycle_settings summary { cursor: pointer; }
+#stafe_cycle_settings .stafe-cycle-toggle,
+#stafe_cycle_settings .stafe-cycle-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.7rem 0;
+}
+#stafe_cycle_every { width: 5rem; min-width: 0; min-height: 36px; }
+#stafe_cycle_mode { max-width: 100%; min-height: 36px; }
+#stafe_cycle_settings p + p { margin-top: 0.5rem; }
+
 .stafe-gallery-carousel {
   display: grid;
   min-height: 0;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   grid-template-columns: 46px minmax(0, 1fr) 46px;
   align-items: center;
   gap: 0.7rem;

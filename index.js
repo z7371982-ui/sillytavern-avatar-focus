@@ -3,6 +3,9 @@ import {
     saveSettingsDebounced,
 } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
+import { adjustmentKey, migratePositions, normalizeCycle, nextCycleImage, chatIdentity, createReplyTracker } from './cycle-core.mjs';
+import { MAX_FILE_BYTES, MAX_IMAGE_BYTES, supported, serializeImage, imageIdentity, makeBackup, readBackup } from './gallery-backup.mjs';
+import { installAllBackup, sameImage } from './all-backup.mjs';
 
 const MODULE_NAME = 'sillytavern-avatar-focus';
 const AVATAR_SELECTOR = [
@@ -61,6 +64,7 @@ let suppressClickKey = '';
 let clickSequence = null;
 let replacementTarget = null;
 let galleryBusy = false;
+let allBackupUI = null;
 let galleryDatabasePromise = null;
 let settingsPanelInstalling = false;
 let settingsPanelUnavailable = false;
@@ -75,6 +79,12 @@ let toolsReturnFocus = null;
 let toolsOpening = false;
 let galleryCursor = 0;
 let galleryPendingSelectionId = '';
+let cycleAvailable = false;
+let cycleBusy = false;
+let cycleQueue = Promise.resolve();
+let cycleCleanup = null;
+const cyclePending = new Map();
+const cycleRevisions = new Map();
 
 function isImageFile(file) {
     return file instanceof Blob
@@ -177,10 +187,11 @@ async function addGalleryRecords(ownerKey, files, options = {}) {
         return [];
     }
 
-    const records = validFiles.map((file, index) => createGalleryRecord(ownerKey, file, {
+    const importedAt = Date.now();
+    const records = validFiles.map((file, index) => ({ ...createGalleryRecord(ownerKey, file, {
         name: options.name && index === 0 ? options.name : file.name,
         original: options.original && index === 0,
-    }));
+    }), createdAt: importedAt + index / 1000 }));
     const database = await openGalleryDatabase();
     await new Promise((resolve, reject) => {
         const transaction = database.transaction(LIBRARY_STORE_NAME, 'readwrite');
@@ -231,7 +242,173 @@ function getSettings() {
     if (!current.libraryActive || typeof current.libraryActive !== 'object' || Array.isArray(current.libraryActive)) {
         current.libraryActive = {};
     }
+    if (!current.cycles || typeof current.cycles !== 'object' || Array.isArray(current.cycles)) current.cycles = {};
+    if (migratePositions(current)) saveSettingsDebounced();
     return current;
+}
+
+function getPositionKey(key) {
+    return adjustmentKey(key, getSettings().libraryActive[key]);
+}
+
+function resetCycleProgress(key) {
+    cycleRevisions.set(key, (cycleRevisions.get(key) || 0) + 1);
+    cyclePending.delete(key);
+    if (getSettings().cycles[key]) {
+        getSettings().cycles[key] = { ...normalizeCycle(getSettings().cycles[key]), progress: 0, remaining: [] };
+    }
+}
+
+function renderCycleSettings() {
+    const panel = document.getElementById('stafe_cycle_settings');
+    if (!panel) return;
+    const isCharacter = replacementTarget?.kind === 'character';
+    panel.hidden = !isCharacter;
+    if (!isCharacter) return;
+    const config = normalizeCycle(getSettings().cycles[replacementTarget.key]);
+    document.getElementById('stafe_cycle_enabled').checked = config.enabled;
+    document.getElementById('stafe_cycle_every').value = String(config.every);
+    document.getElementById('stafe_cycle_mode').value = config.mode;
+    document.getElementById('stafe_cycle_enabled').disabled = !cycleAvailable;
+    document.getElementById('stafe_cycle_status').textContent = !cycleAvailable
+        ? '当前酒馆缺少安全计数所需的事件，自动轮换暂不可用；手动换图不受影响。'
+        : getCycleContext()?.groupId
+            ? '原生群聊中暂停自动轮换，避免把群聊重新生成计为新回复。单张多人角色卡可正常使用。'
+        : galleryRecordOrder.length < 2
+            ? '至少需要两张图片才会轮换。设置只对这个角色生效。'
+            : config.enabled
+                ? `已计数 ${Math.min(config.progress, config.every)} / ${config.every}。使用本角色头像库中的全部图片。`
+                : '未开启。开启后仅轮换这个角色，user 头像不参与。';
+}
+
+function bindCycleSettings() {
+    const panel = document.getElementById('stafe_cycle_settings');
+    panel?.addEventListener('change', () => {
+        const target = replacementTarget;
+        if (target?.kind !== 'character') return;
+        const input = document.getElementById('stafe_cycle_every');
+        const every = Number(input.value);
+        if (!Number.isSafeInteger(every) || every < 1) {
+            input.setCustomValidity('请输入大于或等于 1 的整数。');
+            input.reportValidity();
+            return;
+        }
+        input.setCustomValidity('');
+        resetCycleProgress(target.key);
+        getSettings().cycles[target.key] = {
+            enabled: cycleAvailable && document.getElementById('stafe_cycle_enabled').checked,
+            every,
+            mode: document.getElementById('stafe_cycle_mode').value,
+            progress: 0,
+            remaining: [],
+        };
+        saveSettingsDebounced();
+        renderCycleSettings();
+    });
+    document.getElementById('stafe_cycle_every')?.addEventListener('input', event => event.target.setCustomValidity(''));
+}
+
+function getCycleContext() {
+    try { return globalThis.SillyTavern?.getContext?.() || null; } catch { return null; }
+}
+
+function cyclePanelOpen() {
+    return Boolean(editorState || galleryBusy || allBackupUI?.isBusy() || document.getElementById('stafe_gallery')?.hidden === false);
+}
+
+function enqueueCycle(key, identity) {
+    cyclePending.set(key, identity);
+    flushPendingCycles();
+}
+
+function flushPendingCycles() {
+    if (!cycleAvailable || cyclePanelOpen()) return;
+    for (const [key, identity] of cyclePending) {
+        cyclePending.delete(key);
+        const revision = cycleRevisions.get(key) || 0;
+        cycleQueue = cycleQueue.then(() => runCycle(key, identity, revision)).catch(error => {
+            console.warn('[Avatar Focus] Auto-cycle failed:', error);
+            notify('warning', '自动轮换未成功，已保留当前头像，可在头像库手动切换。');
+        });
+    }
+}
+
+async function runCycle(key, identity, revision) {
+    const valid = () => cycleAvailable && key.startsWith('avatar:')
+        && chatIdentity(getCycleContext()) === identity
+        && (cycleRevisions.get(key) || 0) === revision
+        && normalizeCycle(getSettings().cycles[key]).enabled;
+    if (!valid()) return;
+    if (cyclePanelOpen()) { cyclePending.set(key, identity); return; }
+    const config = normalizeCycle(getSettings().cycles[key]);
+    if (config.progress < config.every) return;
+    const records = await getGalleryRecords(key);
+    if (!valid()) return;
+    if (cyclePanelOpen()) { cyclePending.set(key, identity); return; }
+    const next = nextCycleImage(records.map(record => record.id), getSettings().libraryActive[key], config);
+    if (!next) {
+        getSettings().cycles[key] = { ...config, progress: 0, remaining: [] };
+        saveSettingsDebounced();
+        return;
+    }
+    const record = records.find(item => item.id === next.id);
+    const avatarId = key.slice('avatar:'.length);
+    const character = getCycleContext()?.characters?.find(item => item.avatar === avatarId);
+    if (!character) return;
+    cycleBusy = true;
+    try {
+        const file = new File([record.blob], record.name || 'avatar.png', { type: record.type || 'image/png' });
+        const success = await replaceCharacterAvatar(file, { kind: 'character', key, avatarId, label: character.name || '角色' }, { silent: true });
+        if (!success) return;
+        // The request targets an explicit card file, never whichever card is now open.
+        getSettings().libraryActive[key] = record.id;
+        const latest = normalizeCycle(getSettings().cycles[key]);
+        getSettings().cycles[key] = { ...latest, progress: Math.max(0, latest.progress - config.every), remaining: next.remaining };
+        saveSettingsDebounced();
+        applySavedAdjustmentsForImageKey(key);
+    } finally {
+        cycleBusy = false;
+    }
+}
+
+function installCycleEvents() {
+    cycleCleanup?.();
+    const context = getCycleContext();
+    const source = context?.eventSource;
+    const types = context?.eventTypes;
+    const required = ['GENERATION_STARTED', 'CHARACTER_MESSAGE_RENDERED', 'GENERATION_STOPPED', 'GENERATION_ENDED', 'CHAT_CHANGED'];
+    cycleAvailable = Boolean(source && typeof source.on === 'function' && typeof source.removeListener === 'function'
+        && required.every(name => typeof types?.[name] === 'string'));
+    if (!cycleAvailable) return;
+    const tracker = createReplyTracker();
+    const bindings = [];
+    const bind = (name, handler) => { source.on(types[name], handler); bindings.push([types[name], handler]); };
+    bind('GENERATION_STARTED', (type, _options, dryRun) => tracker.start(getCycleContext(), type, dryRun));
+    bind('CHARACTER_MESSAGE_RENDERED', (id, type) => {
+        const reply = tracker.accept(getCycleContext(), id, type);
+        if (!reply) return;
+        const config = normalizeCycle(getSettings().cycles[reply.key]);
+        if (!config.enabled) return;
+        // Saturate at the threshold while a panel is open; don't burst through images on close.
+        config.progress = Math.min(config.every, config.progress + 1);
+        getSettings().cycles[reply.key] = config;
+        saveSettingsDebounced();
+        if (replacementTarget?.key === reply.key) renderCycleSettings();
+        if (config.progress >= config.every) enqueueCycle(reply.key, reply.identity);
+    });
+    bind('GENERATION_STOPPED', () => tracker.clear());
+    bind('GENERATION_ENDED', () => tracker.end(getCycleContext()));
+    bind('CHAT_CHANGED', () => { tracker.clear(); cyclePending.clear(); });
+    const cleanup = () => {
+        tracker.clear();
+        cyclePending.clear();
+        bindings.forEach(([event, handler]) => source.removeListener(event, handler));
+        window.removeEventListener('pagehide', onPageHide);
+        cycleAvailable = false;
+    };
+    const onPageHide = event => { if (!event.persisted) cleanup(); };
+    window.addEventListener('pagehide', onPageHide);
+    cycleCleanup = cleanup;
 }
 
 function notify(level, message) {
@@ -569,7 +746,7 @@ async function prepareZoomLibrarySource(key, preferredRecord = null) {
         }
         const livePosition = editorState?.key === key
             ? editorState.draft
-            : cleanPosition(getSettings().positions[key]);
+            : cleanPosition(getSettings().positions[getPositionKey(key)]);
         if (livePosition) {
             applyPositionForKey(key, livePosition);
             if (editorState?.key === key) renderEditorPosition(editorState.draft, false);
@@ -854,7 +1031,7 @@ function applySavedPosition(image) {
     const settings = getSettings();
     const position = editorState?.key === getImageKey(image)
         ? editorState.draft
-        : cleanPosition(settings.positions[getImageKey(image)]);
+        : cleanPosition(settings.positions[getPositionKey(getImageKey(image))]);
     if (position) {
         setImagePosition(image, position);
     } else {
@@ -1007,6 +1184,8 @@ function bustVisibleAvatarCache(key) {
 }
 
 function chooseAvatarReplacement(image) {
+    if(allBackupUI?.isBusy()){notify('info','请先完成或取消全部图库备份操作。');return;}
+    if (cycleBusy) { notify('info', '头像正在切换，请稍后再打开。'); return; }
     const descriptor = getReplacementDescriptor(image);
     if (!descriptor) {
         notify('warning', '这个头像不是角色或用户头像，无法使用头像库。');
@@ -1016,7 +1195,7 @@ function chooseAvatarReplacement(image) {
     void openAvatarGallery();
 }
 
-async function replaceCharacterAvatar(file, target = replacementTarget) {
+async function replaceCharacterAvatar(file, target = replacementTarget, { silent = false } = {}) {
     if (!target || target.kind !== 'character') {
         return false;
     }
@@ -1025,7 +1204,7 @@ async function replaceCharacterAvatar(file, target = replacementTarget) {
     if (input instanceof HTMLInputElement) {
         input.disabled = true;
     }
-    notify('info', '正在替换“' + target.label + '”的头像……');
+    if (!silent) notify('info', '正在替换“' + target.label + '”的头像……');
 
     try {
         const formData = new FormData();
@@ -1050,7 +1229,7 @@ async function replaceCharacterAvatar(file, target = replacementTarget) {
                 preview.src = '/characters/' + encodeURIComponent(target.avatarId) + '?t=' + Date.now();
             }
         }
-        notify('success', '“' + target.label + '”的头像已替换；需要时可再长按微调取景。');
+        if (!silent) notify('success', '“' + target.label + '”的头像已替换；需要时可再长按微调取景。');
         return true;
     } catch (error) {
         console.error('[Avatar Focus] Character avatar replacement failed:', error);
@@ -1248,6 +1427,7 @@ async function renderAvatarGallery() {
     const preferredIndex = records.findIndex((record) => record.id === preferredId);
     galleryCursor = records.length ? (preferredIndex >= 0 ? preferredIndex : 0) : 0;
     renderGalleryCarousel();
+    renderCycleSettings();
 }
 
 function moveGalleryCursor(direction) {
@@ -1343,6 +1523,7 @@ function closeAvatarGallery() {
     galleryCursor = 0;
     galleryPendingSelectionId = '';
     replacementTarget = null;
+    flushPendingCycles();
     const input = document.getElementById('stafe_replace_input');
     if (input instanceof HTMLInputElement) {
         input.value = '';
@@ -1388,6 +1569,7 @@ async function selectGalleryRecord(id = getCurrentGalleryRecord()?.id) {
             : await replaceCharacterAvatar(file, target);
         if (success) {
             getSettings().libraryActive[target.key] = record.id;
+            resetCycleProgress(target.key);
             saveSettingsDebounced();
             applySavedAdjustmentsForImageKey(target.key);
             if (target.kind === 'persona') {
@@ -1417,12 +1599,19 @@ async function removeGalleryRecord(id = getCurrentGalleryRecord()?.id) {
             : null;
         galleryPendingSelectionId = nextRecord?.id || '';
         await deleteGalleryRecord(id);
-        delete getSettings().saturations[getLibrarySaturationKey(target.key, id)];
-        if (getSettings().libraryActive[target.key] === id) {
-            delete getSettings().libraryActive[target.key];
+        const settings = getSettings();
+        const adjustment = adjustmentKey(target.key, id);
+        if (settings.libraryActive[target.key] === id) {
+            // Deleting the library record must not change the current displayed crop/color.
+            if (settings.positions[adjustment]) settings.positions[target.key] = { ...settings.positions[adjustment] };
+            if (Object.hasOwn(settings.saturations, adjustment)) settings.saturations[target.key] = settings.saturations[adjustment];
+            delete settings.libraryActive[target.key];
             releaseZoomLibrarySource(target.key);
             applySavedAdjustmentsForImageKey(target.key);
         }
+        delete settings.saturations[adjustment];
+        delete settings.positions[adjustment];
+        resetCycleProgress(target.key);
         saveSettingsDebounced();
         await renderAvatarGallery();
     } catch (error) {
@@ -1651,6 +1840,8 @@ function renderEditorPosition(position, applyLive = true) {
 }
 
 function openEditor(image) {
+    if(allBackupUI?.isBusy()){notify('info','请先完成或取消全部图库备份操作。');return;}
+    if (cycleBusy) { notify('info', '头像正在切换，请稍后再调整。'); return; }
     const editor = document.getElementById('stafe_editor');
     const preview = document.getElementById('stafe_preview_image');
     const frame = document.getElementById('stafe_preview_frame');
@@ -1664,7 +1855,8 @@ function openEditor(image) {
         notify('warning', '这个头像没有可识别的图片地址。');
         return;
     }
-    const saved = cleanPosition(getSettings().positions[key]);
+    const positionKey = getPositionKey(key);
+    const saved = cleanPosition(getSettings().positions[positionKey]);
     const saturationKey = getSaturationKey(image);
     const savedSaturation = cleanSaturation(getSettings().saturations[saturationKey]);
     const start = {
@@ -1677,6 +1869,7 @@ function openEditor(image) {
         image,
         key,
         saturationKey,
+        positionKey,
         initialSaved: saved ? { ...saved } : null,
         initialSaturation: savedSaturation,
         filterWithoutSaturation: original.filterWithoutSaturation,
@@ -1717,7 +1910,7 @@ function closeEditor(commit) {
     }
     const state = editorState;
     if (commit) {
-        getSettings().positions[state.key] = {
+        getSettings().positions[state.positionKey] = {
             x: roundPosition(state.draft.x),
             y: roundPosition(state.draft.y),
             zoom: roundZoom(state.draft.zoom),
@@ -1740,6 +1933,7 @@ function closeEditor(commit) {
     document.body.classList.remove('stafe-modal-open');
     document.getElementById('stafe_preview_frame')?.classList.remove('stafe-dragging');
     editorState = null;
+    flushPendingCycles();
 }
 
 function calculatePreviewOverflow(frame, image, zoom = DEFAULT_ZOOM) {
@@ -2062,7 +2256,77 @@ function bindTripleClickReplacement() {
     });
 }
 
+function backupProfile(key, record) {
+    const id = adjustmentKey(key, record.id), settings = getSettings();
+    return { position: cleanPosition(settings.positions[id]), saturation: cleanSaturation(settings.saturations[id]) };
+}
+
+async function exportGalleryBackup() {
+    if(galleryBusy || !replacementTarget)return;
+    const target={...replacementTarget};setGalleryBusy(true);
+    try {
+        const records=await getGalleryRecords(target.key);
+        if(!records.length)throw new Error('当前头像库为空，请先添加图片。');
+        const backup=await makeBackup(records,target.label,r=>backupProfile(target.key,r));
+        const blob=new Blob([JSON.stringify(backup)],{type:'application/json'});
+        const url=URL.createObjectURL(blob),link=document.createElement('a');
+        link.href=url;link.download=`头像库-${String(target.label||'备份').replace(/[\\/:*?"<>|\u0000-\u001f]/g,'_').slice(0,60)}-${Date.now()}.stafe.json`;
+        document.body.append(link);link.click();link.remove();
+        // The download must acquire the URL before it is revoked (mobile browsers).
+        const cleanup=()=>{clearTimeout(timer);URL.revokeObjectURL(url);window.removeEventListener('pagehide',cleanup);};
+        const timer=setTimeout(cleanup,60000);window.addEventListener('pagehide',cleanup,{once:true});
+        globalThis.toastr?.success?.('已发起下载，请在浏览器下载列表中确认备份文件。');
+    }catch(error){globalThis.toastr?.error?.(error.message||'导出失败。');}
+    finally{setGalleryBusy(false);}
+}
+
+async function importGalleryBackup(file, target) {
+    if(!file || galleryBusy || !target)return;
+    setGalleryBusy(true);
+    try {
+        if(file.size>MAX_FILE_BYTES)throw new Error('备份文件不能超过 96 MiB。');
+        const backup=readBackup(await file.text());
+        if(!backup.images.length)throw new Error('备份中没有图片。');
+        if(!window.confirm(`将“${backup.label}”中的 ${backup.images.length} 张图片合并到“${target.label}”？\n保留现有图库和当前头像；同图同调整跳过，不同调整保留副本。`))return;
+        const existing=await getGalleryRecords(target.key),seen=new Set();
+        for(const record of existing){
+            if(supported(record.blob) && record.blob.size<=MAX_IMAGE_BYTES)seen.add(imageIdentity(await serializeImage(record,backupProfile(target.key,record))));
+        }
+        const additions=[];
+        for(const entry of backup.images){
+            const identity=imageIdentity(entry);if(seen.has(identity))continue;
+            // Decode all new images before opening the write transaction. No partial import.
+            const url=URL.createObjectURL(entry.blob);
+            try{await new Promise((resolve,reject)=>{
+                const image=new Image();
+                const done=(error)=>{clearTimeout(timer);image.onload=null;image.onerror=null;image.src='';error?reject(error):resolve();};
+                const timer=setTimeout(()=>done(new Error('图片读取超时，未导入。')),20000);
+                image.onload=()=>done();image.onerror=()=>done(new Error('备份中有无法显示的图片，未导入。'));image.src=url;
+            });}
+            finally{URL.revokeObjectURL(url);}
+            seen.add(identity);additions.push(entry);
+        }
+        const start=Math.max(Date.now(),...existing.map(r=>Number(r.createdAt)||0))+1;
+        const records=additions.map((entry,i)=>({...createGalleryRecord(target.key,entry.blob,{name:entry.name}),createdAt:start+i,backupPosition:entry.position,backupSaturation:entry.saturation}));
+        if(records.length){
+            const db=await openGalleryDatabase();
+            await new Promise((resolve,reject)=>{
+                const tx=db.transaction(LIBRARY_STORE_NAME,'readwrite');
+                for(const record of records)tx.objectStore(LIBRARY_STORE_NAME).add(record);
+                tx.oncomplete=resolve;tx.onerror=()=>reject(new Error('本地空间不足或写入失败，未完成导入。'));tx.onabort=()=>reject(new Error('导入已中止，原图库未删除。'));
+            });
+            const settings=getSettings();
+            for(const r of records){const id=adjustmentKey(target.key,r.id);if(r.backupPosition)settings.positions[id]=r.backupPosition;if(r.backupSaturation!==null)settings.saturations[id]=r.backupSaturation;}
+            saveSettingsDebounced();
+        }
+        if(replacementTarget?.key===target.key)await renderAvatarGallery();
+        globalThis.toastr?.success?.(`导入 ${records.length} 张，跳过 ${backup.images.length-records.length} 张重复图片。当前头像未改变。`);
+    }catch(error){globalThis.toastr?.error?.(error.message||'导入失败，原图库未删除。');}
+    finally{setGalleryBusy(false);}
+}
+
 function bindAvatarGallery() {
+    bindCycleSettings();
     const gallery = document.getElementById('stafe_gallery');
     const input = document.getElementById('stafe_replace_input');
     const carousel = document.getElementById('stafe_gallery_carousel');
@@ -2071,6 +2335,9 @@ function bindAvatarGallery() {
     }
 
     let swipeStart = null;
+    const backupInput=document.getElementById('stafe_backup_input');
+    let backupTarget=null;
+    backupInput?.addEventListener('change',()=>{const file=backupInput.files?.[0];backupInput.value='';void importGalleryBackup(file,backupTarget);backupTarget=null;});
 
     gallery.addEventListener('click', (event) => {
         const actionTarget = event.target instanceof Element
@@ -2080,7 +2347,13 @@ function bindAvatarGallery() {
         if (!action) {
             return;
         }
-        if (action === 'close') {
+        if(galleryBusy)return;
+        if (action === 'export-backup') {
+            void exportGalleryBackup();
+        } else if(action === 'import-backup') {
+            backupTarget=replacementTarget?{...replacementTarget}:null;
+            backupInput.value='';backupInput.click();
+        } else if (action === 'close') {
             closeAvatarGallery();
         } else if (action === 'import') {
             input.value = '';
@@ -2269,12 +2542,118 @@ async function installSettingsPanel() {
         });
         document.getElementById('stafe_clear_all')?.addEventListener('click', clearAllSavedPositions);
         updateSavedCount();
+        installAllBackupPanel();
     } catch (error) {
         settingsPanelUnavailable = true;
         console.error('[Avatar Focus] Failed to install settings panel:', error);
     } finally {
         settingsPanelInstalling = false;
     }
+}
+
+function allBackupTargets() {
+    const targets=new Map();
+    for(const character of getCycleContext()?.characters || []){
+        if(character?.avatar)targets.set('avatar:'+character.avatar,{key:'avatar:'+character.avatar,kind:'character',label:String(character.name||character.avatar).slice(0,240)});
+    }
+    forEachAvatar(image=>{const d=getReplacementDescriptor(image);if(d&&!targets.has(d.key))targets.set(d.key,{key:d.key,kind:d.kind,label:String(d.label).slice(0,240)});});
+    return [...targets.values()];
+}
+
+async function allBackupRecords(){
+    const db=await openGalleryDatabase();
+    return new Promise((resolve,reject)=>{const req=db.transaction(LIBRARY_STORE_NAME,'readonly').objectStore(LIBRARY_STORE_NAME).getAll();req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('读取图库失败。'));});
+}
+
+async function allBackupSnapshot(){
+    if(galleryBusy||cycleBusy||editorState)throw new Error('请等头像操作完成并关闭调整面板后重试。');
+    const records=await allBackupRecords(),settings=getSettings(),targets=new Map(allBackupTargets().map(t=>[t.key,t]));
+    const owners=new Set(records.map(r=>r.ownerKey));
+    for(const key of [...Object.keys(settings.positions),...Object.keys(settings.saturations),...Object.keys(settings.cycles||{}),...Object.keys(settings.pendingLibraries||{})]){
+        const owner=key.split('::library::')[0];if(/^(avatar:|persona:|pending:)/.test(owner))owners.add(owner);
+    }
+    const groups=[];
+    for(const owner of [...owners].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}))){
+        const pending=settings.pendingLibraries?.[owner];
+        const target=targets.get(owner),key=pending?.sourceKey||owner;
+        if(!/^(avatar:|persona:)/.test(key))throw new Error('待关联图库信息缺失，请保留原备份并联系作者。');
+        const images=records.filter(r=>r.ownerKey===owner).sort((a,b)=>a.createdAt-b.createdAt).map(r=>({...r,...backupProfile(owner,r)}));
+        groups.push({key,label:pending?.label||target?.label||key.slice(key.indexOf(':')+1),kind:key.startsWith('avatar:')?'character':'persona',cycle:normalizeCycle(settings.cycles?.[owner]),base:{position:cleanPosition(settings.positions[owner]),saturation:cleanSaturation(settings.saturations[owner])},images,...(pending?{pendingOwner:owner}:{})});
+    }
+    const preferences={};for(const key of ['enabled','tripleClickEnabled','showInWandMenu','longPressMs'])preferences[key]=settings[key];
+    return {groups,preferences};
+}
+
+async function validateBackupImage(blob){
+    const url=URL.createObjectURL(blob);
+    try{await new Promise((resolve,reject)=>{
+        const image=new Image();const done=error=>{clearTimeout(timer);image.onload=null;image.onerror=null;image.src='';error?reject(error):resolve();};
+        const timer=setTimeout(()=>done(new Error('图片解码超时，未导入。')),20000);
+        image.onload=()=>done();image.onerror=()=>done(new Error('存在无法显示的图片，未导入。'));image.src=url;
+    });}finally{URL.revokeObjectURL(url);}
+}
+
+async function mergeAllBackup(plans,options,progress){
+    if(galleryBusy||cycleBusy||editorState)throw new Error('请先关闭调整面板并等待头像操作完成。');
+    const settings=getSettings(),all=await allBackupRecords(),targets=new Map(allBackupTargets().map(t=>[t.key,t]));
+    const pending={...(settings.pendingLibraries||{})},staged=[],moves=new Set(),updates=[];
+    const cache=new Map();const report={added:0,duplicates:0,kept:0,skipped:0};
+    let createdAt=Math.max(Date.now(),...all.map(r=>Number(r.createdAt)||0))+1;
+    for(let n=0;n<plans.length;n++){
+        const {group,choice}=plans[n];progress(`准备导入 ${n+1}/${plans.length}：${group.label}`);
+        if(choice==='skip'){report.skipped++;continue;}
+        let owner=choice;
+        if(choice==='keep'){
+            owner=group.pendingOwner || Object.keys(pending).find(k=>pending[k].sourceKey===group.key&&pending[k].label===group.label);
+            if(!owner)owner='pending:'+createGalleryRecord('',new Blob()).id;
+            pending[owner]={sourceKey:group.key,label:group.label,kind:group.kind};report.kept++;
+        }else if(!targets.has(owner)||targets.get(owner).kind!==group.kind)throw new Error('接收角色已变化，请取消并重新导入。');
+        if(group.pendingOwner===owner)continue;
+        if(!cache.has(owner))cache.set(owner,all.filter(r=>r.ownerKey===owner).map(r=>({...r,...backupProfile(owner,r)})));
+        const current=cache.get(owner);
+        for(const entry of group.images){
+            let duplicate=false;for(const old of current)if(await sameImage(entry,old)){duplicate=true;break;}
+            if(duplicate){report.duplicates++;continue;}
+            await validateBackupImage(entry.blob);
+            const record={...createGalleryRecord(owner,entry.blob,{name:entry.name}),createdAt:createdAt++,backupPosition:entry.position,backupSaturation:entry.saturation};
+            staged.push(record);current.push({...record,position:entry.position,saturation:entry.saturation});report.added++;
+        }
+        updates.push({owner,group});
+        if(group.pendingOwner&&group.pendingOwner!==owner)moves.add(group.pendingOwner);
+    }
+    // One transaction for every selected library. No database changes before validation finishes.
+    const db=await openGalleryDatabase();
+    await new Promise((resolve,reject)=>{
+        const tx=db.transaction(LIBRARY_STORE_NAME,'readwrite'),store=tx.objectStore(LIBRARY_STORE_NAME);
+        for(const r of staged)store.add(r);
+        for(const r of all)if(moves.has(r.ownerKey))store.delete(r.id);
+        tx.oncomplete=resolve;tx.onerror=()=>reject(new Error('写入失败，请检查浏览器剩余空间。'));tx.onabort=()=>reject(new Error('导入事务中止，未完成写入。'));
+    });
+    for(const r of staged){const key=adjustmentKey(r.ownerKey,r.id);if(r.backupPosition)settings.positions[key]=r.backupPosition;if(r.backupSaturation!=null)settings.saturations[key]=r.backupSaturation;}
+    for(const {owner,group} of updates){
+        if(owner.startsWith('avatar:')||owner.startsWith('pending:')){
+            if(options.overwrite||!Object.hasOwn(settings.cycles,owner)){settings.cycles[owner]={...normalizeCycle(group.cycle),progress:0,remaining:[]};cyclePending.delete(owner);cycleRevisions.set(owner,(cycleRevisions.get(owner)||0)+1);}
+        }
+        if(!settings.libraryActive[owner]){
+            if(!Object.hasOwn(settings.positions,owner)&&group.base.position)settings.positions[owner]=group.base.position;
+            if(!Object.hasOwn(settings.saturations,owner)&&group.base.saturation!=null)settings.saturations[owner]=group.base.saturation;
+        }
+    }
+    for(const owner of moves){delete pending[owner];delete settings.cycles[owner];delete settings.positions[owner];delete settings.saturations[owner];for(const r of all)if(r.ownerKey===owner){delete settings.positions[adjustmentKey(owner,r.id)];delete settings.saturations[adjustmentKey(owner,r.id)];}}
+    settings.pendingLibraries=pending;
+    const prefs=options.preferences;
+    if(prefs&&typeof prefs==='object'){
+        for(const key of ['enabled','tripleClickEnabled','showInWandMenu'])if(typeof prefs[key]==='boolean')settings[key]=prefs[key];
+        if([350,450,600].includes(prefs.longPressMs))settings.longPressMs=prefs.longPressMs;
+        document.getElementById('stafe_enabled').checked=settings.enabled;document.getElementById('stafe_triple_click_enabled').checked=settings.tripleClickEnabled;document.getElementById('stafe_show_in_wand_menu').checked=settings.showInWandMenu;document.getElementById('stafe_long_press').value=String(settings.longPressMs);installToolsMenuEntry();
+    }
+    saveSettingsDebounced();updateSavedCount();
+    for(const {owner} of updates)if(!owner.startsWith('pending:'))applySavedAdjustmentsForImageKey(owner);
+    return report;
+}
+
+function installAllBackupPanel(){
+    if(!allBackupUI)allBackupUI=installAllBackup({snapshot:allBackupSnapshot,targets:allBackupTargets,merge:mergeAllBackup});
 }
 
 async function installEditor() {
@@ -2414,6 +2793,7 @@ function installToolsMenuEntry() {
 
 async function initialize() {
     getSettings();
+    installCycleEvents();
     updateEditorViewportHeight();
     window.addEventListener('resize', updateEditorViewportHeight, { passive: true });
     window.visualViewport?.addEventListener('resize', updateEditorViewportHeight, { passive: true });

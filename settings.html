@@ -45,7 +45,17 @@
         </button>
       </div>
 
-      <small>头像库保存在当前浏览器中；点“使用这张”时才会替换对应头像。扩展不会读取聊天内容。</small>
+      <div class="stafe-all-controls">
+        <b>全部图库备份</b>
+        <div class="stafe-gallery-toolbar">
+          <button id="stafe_all_export" class="menu_button" type="button">导出全部 ZIP</button>
+          <button id="stafe_all_import" class="menu_button" type="button">导入全部 ZIP</button>
+          <button id="stafe_all_pending" class="menu_button" type="button">管理待关联图库</button>
+        </div>
+        <input id="stafe_all_file" type="file" accept=".zip,application/zip" hidden>
+        <p id="stafe_all_status" class="stafe-note" role="status">一次备份所有角色和用户图库。导入前可核对匹配、选择保留或跳过。</p>
+      </div>
+      <small>图库保存在当前浏览器中。备份只含本扩展数据，不含聊天正文或角色卡。</small>
     </div>
   </div>
 </div>
