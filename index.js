@@ -242,6 +242,9 @@ function getSettings() {
     if (!current.libraryActive || typeof current.libraryActive !== 'object' || Array.isArray(current.libraryActive)) {
         current.libraryActive = {};
     }
+    if (!current.avatarRevisions || typeof current.avatarRevisions !== 'object' || Array.isArray(current.avatarRevisions)) {
+        current.avatarRevisions = {};
+    }
     if (!current.cycles || typeof current.cycles !== 'object' || Array.isArray(current.cycles)) current.cycles = {};
     if (migratePositions(current)) saveSettingsDebounced();
     return current;
@@ -1028,6 +1031,7 @@ function applySavedPosition(image) {
     if (!isAvatarImage(image)) {
         return;
     }
+    syncAvatarRevision(image);
     const settings = getSettings();
     const position = editorState?.key === getImageKey(image)
         ? editorState.draft
@@ -1165,8 +1169,42 @@ function getReplacementDescriptor(image) {
     return null;
 }
 
+function syncAvatarRevision(image) {
+    const key = getImageKey(image);
+    if (!key.startsWith('avatar:') && !key.startsWith('persona:')) return;
+    const settings = getSettings();
+    let revision = settings.avatarRevisions[key];
+    // Upgrade existing selections once, not on every message or frame.
+    if (!revision && settings.libraryActive[key]) {
+        revision = settings.avatarRevisions[key] = String(Date.now());
+        saveSettingsDebounced();
+    }
+    if (!revision) return;
+    const revise = (source) => {
+        try {
+            const url = new URL(source, location.href);
+            if (!['http:', 'https:'].includes(url.protocol) || url.origin !== location.origin) return source;
+            url.searchParams.set('t', String(revision));
+            return url.href;
+        } catch { return source; }
+    };
+    const src = image.getAttribute('src');
+    if (src) { const next = revise(src); if (next !== src) image.setAttribute('src', next); }
+    // Only refresh alternate candidates identifying the same avatar, never decorative sources.
+    const srcset = image.getAttribute('srcset');
+    if (srcset) {
+        const next = srcset.replace(/(\S+)(\s+\d+(?:\.\d+)?[wx])?(\s*,|$)/g, (whole, url, descriptor = '', comma = '') => {
+            const probe = document.createElement('img'); probe.setAttribute('src', url);
+            return getImageKey(probe) === key ? revise(url) + descriptor + comma : whole;
+        });
+        if (next !== srcset) image.setAttribute('srcset', next);
+    }
+}
+
 function bustVisibleAvatarCache(key) {
     const stamp = String(Date.now());
+    getSettings().avatarRevisions[key] = stamp;
+    saveSettingsDebounced();
     refreshChatResources(key,stamp);
     forEachAvatar((image) => {
         if (getImageKey(image) !== key) {
