@@ -4,8 +4,8 @@ import {
 } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 import { adjustmentKey, migratePositions, normalizeCycle, nextCycleImage, chatIdentity, createReplyTracker } from './cycle-core.mjs';
-import { MAX_FILE_BYTES, MAX_IMAGE_BYTES, supported, serializeImage, imageIdentity, makeBackup, readBackup } from './gallery-backup.mjs';
 import { installAllBackup, sameImage } from './all-backup.mjs';
+import { refreshChatResources } from './avatar-refresh.mjs';
 
 const MODULE_NAME = 'sillytavern-avatar-focus';
 const AVATAR_SELECTOR = [
@@ -1167,6 +1167,7 @@ function getReplacementDescriptor(image) {
 
 function bustVisibleAvatarCache(key) {
     const stamp = String(Date.now());
+    refreshChatResources(key,stamp);
     forEachAvatar((image) => {
         if (getImageKey(image) !== key) {
             return;
@@ -2261,70 +2262,6 @@ function backupProfile(key, record) {
     return { position: cleanPosition(settings.positions[id]), saturation: cleanSaturation(settings.saturations[id]) };
 }
 
-async function exportGalleryBackup() {
-    if(galleryBusy || !replacementTarget)return;
-    const target={...replacementTarget};setGalleryBusy(true);
-    try {
-        const records=await getGalleryRecords(target.key);
-        if(!records.length)throw new Error('当前头像库为空，请先添加图片。');
-        const backup=await makeBackup(records,target.label,r=>backupProfile(target.key,r));
-        const blob=new Blob([JSON.stringify(backup)],{type:'application/json'});
-        const url=URL.createObjectURL(blob),link=document.createElement('a');
-        link.href=url;link.download=`头像库-${String(target.label||'备份').replace(/[\\/:*?"<>|\u0000-\u001f]/g,'_').slice(0,60)}-${Date.now()}.stafe.json`;
-        document.body.append(link);link.click();link.remove();
-        // The download must acquire the URL before it is revoked (mobile browsers).
-        const cleanup=()=>{clearTimeout(timer);URL.revokeObjectURL(url);window.removeEventListener('pagehide',cleanup);};
-        const timer=setTimeout(cleanup,60000);window.addEventListener('pagehide',cleanup,{once:true});
-        globalThis.toastr?.success?.('已发起下载，请在浏览器下载列表中确认备份文件。');
-    }catch(error){globalThis.toastr?.error?.(error.message||'导出失败。');}
-    finally{setGalleryBusy(false);}
-}
-
-async function importGalleryBackup(file, target) {
-    if(!file || galleryBusy || !target)return;
-    setGalleryBusy(true);
-    try {
-        if(file.size>MAX_FILE_BYTES)throw new Error('备份文件不能超过 96 MiB。');
-        const backup=readBackup(await file.text());
-        if(!backup.images.length)throw new Error('备份中没有图片。');
-        if(!window.confirm(`将“${backup.label}”中的 ${backup.images.length} 张图片合并到“${target.label}”？\n保留现有图库和当前头像；同图同调整跳过，不同调整保留副本。`))return;
-        const existing=await getGalleryRecords(target.key),seen=new Set();
-        for(const record of existing){
-            if(supported(record.blob) && record.blob.size<=MAX_IMAGE_BYTES)seen.add(imageIdentity(await serializeImage(record,backupProfile(target.key,record))));
-        }
-        const additions=[];
-        for(const entry of backup.images){
-            const identity=imageIdentity(entry);if(seen.has(identity))continue;
-            // Decode all new images before opening the write transaction. No partial import.
-            const url=URL.createObjectURL(entry.blob);
-            try{await new Promise((resolve,reject)=>{
-                const image=new Image();
-                const done=(error)=>{clearTimeout(timer);image.onload=null;image.onerror=null;image.src='';error?reject(error):resolve();};
-                const timer=setTimeout(()=>done(new Error('图片读取超时，未导入。')),20000);
-                image.onload=()=>done();image.onerror=()=>done(new Error('备份中有无法显示的图片，未导入。'));image.src=url;
-            });}
-            finally{URL.revokeObjectURL(url);}
-            seen.add(identity);additions.push(entry);
-        }
-        const start=Math.max(Date.now(),...existing.map(r=>Number(r.createdAt)||0))+1;
-        const records=additions.map((entry,i)=>({...createGalleryRecord(target.key,entry.blob,{name:entry.name}),createdAt:start+i,backupPosition:entry.position,backupSaturation:entry.saturation}));
-        if(records.length){
-            const db=await openGalleryDatabase();
-            await new Promise((resolve,reject)=>{
-                const tx=db.transaction(LIBRARY_STORE_NAME,'readwrite');
-                for(const record of records)tx.objectStore(LIBRARY_STORE_NAME).add(record);
-                tx.oncomplete=resolve;tx.onerror=()=>reject(new Error('本地空间不足或写入失败，未完成导入。'));tx.onabort=()=>reject(new Error('导入已中止，原图库未删除。'));
-            });
-            const settings=getSettings();
-            for(const r of records){const id=adjustmentKey(target.key,r.id);if(r.backupPosition)settings.positions[id]=r.backupPosition;if(r.backupSaturation!==null)settings.saturations[id]=r.backupSaturation;}
-            saveSettingsDebounced();
-        }
-        if(replacementTarget?.key===target.key)await renderAvatarGallery();
-        globalThis.toastr?.success?.(`导入 ${records.length} 张，跳过 ${backup.images.length-records.length} 张重复图片。当前头像未改变。`);
-    }catch(error){globalThis.toastr?.error?.(error.message||'导入失败，原图库未删除。');}
-    finally{setGalleryBusy(false);}
-}
-
 function bindAvatarGallery() {
     bindCycleSettings();
     const gallery = document.getElementById('stafe_gallery');
@@ -2335,9 +2272,6 @@ function bindAvatarGallery() {
     }
 
     let swipeStart = null;
-    const backupInput=document.getElementById('stafe_backup_input');
-    let backupTarget=null;
-    backupInput?.addEventListener('change',()=>{const file=backupInput.files?.[0];backupInput.value='';void importGalleryBackup(file,backupTarget);backupTarget=null;});
 
     gallery.addEventListener('click', (event) => {
         const actionTarget = event.target instanceof Element
@@ -2348,12 +2282,7 @@ function bindAvatarGallery() {
             return;
         }
         if(galleryBusy)return;
-        if (action === 'export-backup') {
-            void exportGalleryBackup();
-        } else if(action === 'import-backup') {
-            backupTarget=replacementTarget?{...replacementTarget}:null;
-            backupInput.value='';backupInput.click();
-        } else if (action === 'close') {
+        if (action === 'close') {
             closeAvatarGallery();
         } else if (action === 'import') {
             input.value = '';
