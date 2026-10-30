@@ -6,7 +6,7 @@ export function resourceKey(source,base=location.href){
  return match?(match[1].toLowerCase()==='characters'?'avatar:':'persona:')+match[2]:'';}catch{return '';}
 }
 export function refreshChatResources(key,stamp){
- const rules=[];
+ const rules=[],writes=[],pendingIds=new Map();
  let style=document.getElementById('stafe_chat_refresh');
  if(!style){style=document.createElement('style');style.id='stafe_chat_refresh';document.head.append(style);}
  const replace=value=>value.replace(/url\(\s*(["']?)(.*?)\1\s*\)/gi,(whole,_q,src)=>{
@@ -17,20 +17,22 @@ export function refreshChatResources(key,stamp){
  const saved=refreshChatResources.rules ||= new Map();
  for(const element of document.querySelectorAll('#chat, #chat *')){
   if(element instanceof HTMLImageElement){
-   for(const attr of ['src']){const value=element.getAttribute(attr);if(value&&resourceKey(value)===key){const u=new URL(value,location.href);u.searchParams.set('t',stamp);if(value!==u.href)element.setAttribute(attr,u.href);}}
+   for(const attr of ['src']){const value=element.getAttribute(attr);if(value&&resourceKey(value)===key){const u=new URL(value,location.href);u.searchParams.set('t',stamp);if(value!==u.href)writes.push(()=>element.setAttribute(attr,u.href));}}
    const srcset=element.getAttribute('srcset');
-   if(srcset){const next=srcset.replace(/(\S+)(\s+\d+(?:\.\d+)?[wx])?(\s*,|$)/g,(whole,url,descriptor='',comma='')=>{if(resourceKey(url)!==key)return whole;const u=new URL(url,location.href);u.searchParams.set('t',stamp);return u.href+descriptor+comma;});if(next!==srcset)element.setAttribute('srcset',next);}
+   if(srcset){const next=srcset.replace(/(\S+)(\s+\d+(?:\.\d+)?[wx])?(\s*,|$)/g,(whole,url,descriptor='',comma='')=>{if(resourceKey(url)!==key)return whole;const u=new URL(url,location.href);u.searchParams.set('t',stamp);return u.href+descriptor+comma;});if(next!==srcset)writes.push(()=>element.setAttribute('srcset',next));}
   }
   for(const pseudo of ['', '::before','::after']){
    const computed=getComputedStyle(element,pseudo||null);
    for(const property of ['background-image','content']){
     const value=computed.getPropertyValue(property),next=replace(value);if(next===value)continue;
-    if(!pseudo)element.style.setProperty(property,next,'important');
-    else{if(!element.dataset.stafeRefreshId)element.dataset.stafeRefreshId='r'+(++refreshChatResources.sequence);rules.push(`[data-stafe-refresh-id="${element.dataset.stafeRefreshId}"]${pseudo}{${property}:${next}!important}`);}
+    if(!pseudo)writes.push(()=>element.style.setProperty(property,next,'important'));
+    else{let id=element.dataset.stafeRefreshId||pendingIds.get(element);if(!id){id='r'+(++refreshChatResources.sequence);pendingIds.set(element,id);writes.push(()=>{element.dataset.stafeRefreshId=id});}rules.push(`[data-stafe-refresh-id="${id}"]${pseudo}{${property}:${next}!important}`);}
    }
   }
  }
- saved.set(key,rules.join('\n'));style.textContent=[...saved.values()].join('\n');
+ // Read all computed styles before writing. Interleaving caused repeated style/layout flushes.
+ for(const write of writes)write();
+ saved.set(key,rules.join('\n'));const css=[...saved.values()].join('\n');if(style.textContent!==css)style.textContent=css;
  // Opt-in companion bridge. Do not touch another theme's layout or emit host edit events.
  document.dispatchEvent(new CustomEvent('stafe:avatar-resource-updated', {detail:{key,stamp:String(stamp)}}));
 }

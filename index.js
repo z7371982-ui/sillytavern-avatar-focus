@@ -1176,7 +1176,7 @@ function bustVisibleAvatarCache(key) {
             const url = new URL(image.getAttribute('src') || image.src, location.href);
             if (url.protocol === 'http:' || url.protocol === 'https:') {
                 url.searchParams.set('t', stamp);
-                image.src = url.href;
+                if (image.getAttribute('src') !== url.href) image.src = url.href;
             }
         } catch {
             // The core refresh already handled non-URL image sources.
@@ -2338,9 +2338,8 @@ function bindAvatarGallery() {
 }
 
 function queueMutationImage(image) {
-    if (isAvatarImage(image)) {
-        mutationImages.add(image);
-    }
+    if (!isAvatarImage(image)) return;
+    mutationImages.add(image);
     if (mutationFrame) {
         return;
     }
